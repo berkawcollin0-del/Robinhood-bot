@@ -112,4 +112,34 @@ def run_trading_bot():
     watchlist = ['NVDA', 'AAPL', 'TLYS'] 
     
     for ticker in watchlist:
-        print
+        print(f"\n--- Analyzing {ticker} ---")
+        
+        df = yf.download(ticker, period="2y", interval="1d", progress=False)
+        
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        if 'Adj Close' in df.columns:
+            df = df.drop(columns=['Adj Close'])
+        df.columns = [str(col).lower() for col in df.columns]
+        
+        df = apply_earnings_blackout(df, ticker)
+        best_short, best_long = optimize_parameters(ticker, df)
+        live_df = generate_signals(df, best_short, best_long)
+        
+        todays_signal = live_df['Signal'].iloc[-1]
+        todays_safe = live_df['Safe_To_Trade'].iloc[-1]
+        current_shares = agent.get_current_position(ticker)
+        
+        if todays_safe == 0:
+            print(f"Earnings Blackout active for {ticker}.")
+            if current_shares > 0:
+                agent.execute_trade(ticker, "SELL", current_shares)
+        elif todays_signal == 1 and current_shares == 0:
+            agent.execute_trade(ticker, "BUY", 10)
+        elif todays_signal == -1 and current_shares > 0:
+            agent.execute_trade(ticker, "SELL", current_shares)
+        else:
+            print(f"No actionable setup for {ticker} today.")
+
+if __name__ == "__main__":
+    run_trading_bot()
