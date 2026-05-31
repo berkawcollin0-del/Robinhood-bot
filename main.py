@@ -1,6 +1,5 @@
 import yfinance as yf
 import pandas as pd
-import numpy as np
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from tickers import WATCHLIST
@@ -33,18 +32,8 @@ def is_earnings_near(ticker):
     return False
 
 # ==========================================
-# 2. PATTERN & CONVICTION ENGINE
+# 2. STRICT CONVICTION ENGINE
 # ==========================================
-def get_pattern(df):
-    sma50 = df['close'].rolling(50).mean()
-    sma200 = df['close'].rolling(200).mean()
-    if sma50.iloc[-2] <= sma200.iloc[-2] and sma50.iloc[-1] > sma200.iloc[-1]: return "Golden Cross"
-    if sma50.iloc[-2] >= sma200.iloc[-2] and sma50.iloc[-1] < sma200.iloc[-1]: return "Death Cross"
-    res, sup = df['high'].rolling(20).max().iloc[-2], df['low'].rolling(20).min().iloc[-2]
-    if df['close'].iloc[-1] > res: return "Resistance Breakout"
-    if df['close'].iloc[-1] < sup: return "Support Breakdown"
-    return "Consolidating"
-
 def calculate_conviction_score(ticker, df, weekly_df, regime_score):
     if len(df) < 200 or len(weekly_df) < 40 or is_earnings_near(ticker): return None
     
@@ -52,23 +41,32 @@ def calculate_conviction_score(ticker, df, weekly_df, regime_score):
         if isinstance(d.columns, pd.MultiIndex): d.columns = d.columns.get_level_values(0)
         d.columns = [c.lower() for c in d.columns]
         
-    daily_trend = df['close'].iloc[-1] > df['close'].rolling(200).mean().iloc[-1]
-    weekly_trend = weekly_df['close'].iloc[-1] > weekly_df['close'].rolling(40).mean().iloc[-1]
-    if not (daily_trend and weekly_trend): return None
+    # Gates
+    if not (df['close'].iloc[-1] > df['close'].rolling(200).mean().iloc[-1] and 
+            weekly_df['close'].iloc[-1] > weekly_df['close'].rolling(40).mean().iloc[-1]): return None
     
-    vol_avg = df['volume'].rolling(20).mean()
-    if df['volume'].iloc[-1] <= (vol_avg.iloc[-1] * 1.5): return None
+    if df['volume'].iloc[-1] <= (df['volume'].rolling(20).mean().iloc[-1] * 1.5): return None
     
+    # --- ANTI-CHASE FILTER ---
+    res_level = df['high'].rolling(20).max().iloc[-2]
+    current_price = df['close'].iloc[-1]
+    
+    # Discard if price is > 5% above the breakout level
+    if (current_price / res_level) > 1.05: return None
+    
+    # Confirmation Logic
+    is_retesting = abs(current_price - res_level) / res_level < 0.01
     atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
-    entry = df['close'].iloc[-1]
+    base_score = ((abs(current_price - df['close'].iloc[-2]) / atr) * 100)
+    final_score = (base_score * 1.5) if is_retesting else base_score
     
     return {
         'ticker': ticker,
-        'pattern': get_pattern(df),
-        'score': ((abs(entry - df['close'].iloc[-2]) / atr) * 100) * regime_score,
-        'entry': round(entry, 2),
-        'stop_loss': round(entry - (1.5 * atr), 2),
-        'take_profit': round(entry + (3.0 * atr), 2)
+        'pattern': "Confirmed Retest" if is_retesting else "Breakout",
+        'score': final_score * regime_score,
+        'entry': round(current_price, 2),
+        'stop_loss': round(current_price - (1.5 * atr), 2),
+        'take_profit': round(current_price + (3.0 * atr), 2)
     }
 
 # ==========================================
