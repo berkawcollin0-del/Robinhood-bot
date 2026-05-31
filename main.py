@@ -145,17 +145,17 @@ def run_trading_bot():
         print(f"\n--- Analyzing {ticker} ---")
         
         # 1. Fetch recent data
-df = yf.download(ticker, period="2y", interval="1d", progress=False)
+        df = yf.download(ticker, period="2y",            interval="1d", progress=False)
 
-# If yfinance returned a MultiIndex, flatten it
-if isinstance(df.columns, pd.MultiIndex):
-    df.columns = df.columns.get_level_values(0)
+        # If yfinance returned a MultiIndex,    flatten it
+        if isinstance(df.columns, pd.MultiIndex):
+        df.columns =     df.columns.get_level_values(0)
 
-if 'Adj Close' in df.columns:
+        if 'Adj Close' in df.columns:
     df = df.drop(columns=['Adj Close'])
 
-# Now it is safe to lowercase
-df.columns = [str(col).lower() for col in df.columns]
+        # Now it is safe to lowercase
+        df.columns = [str(col).lower() for col in    df.columns]
 
         
         # 2. Apply Earnings Blackout
