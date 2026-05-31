@@ -144,9 +144,6 @@ def run_trading_bot():
     for ticker in watchlist:
         print(f"\n--- Analyzing {ticker} ---")
         
-            for ticker in watchlist:
-        print(f"\n--- Analyzing {ticker} ---")
-        
         # 1. Fetch recent data
         df = yf.download(ticker, period="2y", interval="1d", progress=False)
         if isinstance(df.columns, pd.MultiIndex):
@@ -158,10 +155,10 @@ def run_trading_bot():
         # 2. Apply Earnings Blackout
         df = apply_earnings_blackout(df, ticker)
         
-        # 3. Parameter Sweep to find the best Moving Averages for this specific stock
+        # 3. Parameter Sweep
         best_short, best_long = optimize_parameters(ticker, df)
         
-        # 4. Generate Live Signals using the optimal parameters
+        # 4. Generate Live Signals
         live_df = generate_signals(df, best_short, best_long)
         
         todays_signal = live_df['Signal'].iloc[-1]
@@ -172,21 +169,21 @@ def run_trading_bot():
         
         # 6. Execute Logic
         if todays_safe == 0:
-            print(f"Earnings Blackout active for {ticker}. No new trades permitted.")
+            print(f"Earnings Blackout active for {ticker}.")
             if current_shares > 0:
-                print(f"Liquidating existing {ticker} position for earnings safety.")
+                print(f"Liquidating existing {ticker} position for safety.")
                 agent.execute_trade(ticker, "SELL", current_shares)
                 
         elif todays_signal == 1 and current_shares == 0:
-            print(f"BUY SIGNAL CONFIRMED for {ticker}. Executing trade...")
-            agent.execute_trade(ticker, "BUY", 10) # Set your standard lot size here
+            print(f"BUY SIGNAL CONFIRMED for {ticker}.")
+            agent.execute_trade(ticker, "BUY", 10)
             
         elif todays_signal == -1 and current_shares > 0:
-            print(f"SELL SIGNAL CONFIRMED for {ticker}. Liquidating position...")
+            print(f"SELL SIGNAL CONFIRMED for {ticker}.")
             agent.execute_trade(ticker, "SELL", current_shares)
             
         else:
-            print(f"No actionable setup for {ticker} today. Holding.")
+            print(f"No actionable setup for {ticker} today.")
 
 if __name__ == "__main__":
     run_trading_bot()
