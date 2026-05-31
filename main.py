@@ -33,8 +33,18 @@ def is_earnings_near(ticker):
     return False
 
 # ==========================================
-# 2. STRICT CONVICTION ENGINE
+# 2. PATTERN & CONVICTION ENGINE
 # ==========================================
+def get_pattern(df):
+    sma50 = df['close'].rolling(50).mean()
+    sma200 = df['close'].rolling(200).mean()
+    if sma50.iloc[-2] <= sma200.iloc[-2] and sma50.iloc[-1] > sma200.iloc[-1]: return "Golden Cross"
+    if sma50.iloc[-2] >= sma200.iloc[-2] and sma50.iloc[-1] < sma200.iloc[-1]: return "Death Cross"
+    res, sup = df['high'].rolling(20).max().iloc[-2], df['low'].rolling(20).min().iloc[-2]
+    if df['close'].iloc[-1] > res: return "Resistance Breakout"
+    if df['close'].iloc[-1] < sup: return "Support Breakdown"
+    return "Consolidating"
+
 def calculate_conviction_score(ticker, df, weekly_df, regime_score):
     if len(df) < 200 or len(weekly_df) < 40 or is_earnings_near(ticker): return None
     
@@ -42,7 +52,6 @@ def calculate_conviction_score(ticker, df, weekly_df, regime_score):
         if isinstance(d.columns, pd.MultiIndex): d.columns = d.columns.get_level_values(0)
         d.columns = [c.lower() for c in d.columns]
         
-    # Gates
     daily_trend = df['close'].iloc[-1] > df['close'].rolling(200).mean().iloc[-1]
     weekly_trend = weekly_df['close'].iloc[-1] > weekly_df['close'].rolling(40).mean().iloc[-1]
     if not (daily_trend and weekly_trend): return None
@@ -50,12 +59,12 @@ def calculate_conviction_score(ticker, df, weekly_df, regime_score):
     vol_avg = df['volume'].rolling(20).mean()
     if df['volume'].iloc[-1] <= (vol_avg.iloc[-1] * 1.5): return None
     
-    # Levels (ATR)
     atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
     entry = df['close'].iloc[-1]
     
     return {
         'ticker': ticker,
+        'pattern': get_pattern(df),
         'score': ((abs(entry - df['close'].iloc[-2]) / atr) * 100) * regime_score,
         'entry': round(entry, 2),
         'stop_loss': round(entry - (1.5 * atr), 2),
