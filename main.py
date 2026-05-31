@@ -1,145 +1,82 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import itertools
-from datetime import timedelta
-import os
+from concurrent.futures import ThreadPoolExecutor
 
 # ==========================================
-# 1. CORE LOGIC & EARNINGS SAFETY
+# 1. MARKET REGIME FILTER (MACRO)
 # ==========================================
-
-def apply_earnings_blackout(df, ticker_symbol, buffer_days=3):
-    """Blocks trading immediately before and after earnings calls."""
-    tkr = yf.Ticker(ticker_symbol)
-    earnings_data = tkr.get_earnings_dates(limit=10)
-    df['Safe_To_Trade'] = 1 
-    
-    if earnings_data is not None:
-        earnings_dates = pd.to_datetime(earnings_data.index).tz_localize(None).date
-        blackout_dates = set()
-        for e_date in earnings_dates:
-            for i in range(-buffer_days, buffer_days + 1):
-                blackout_dates.add(e_date + timedelta(days=i))
-                
-        df['Safe_To_Trade'] = [
-            0 if pd.to_datetime(idx).tz_localize(None).date() in blackout_dates else 1 
-            for idx in df.index
-        ]
-    return df
-
-def generate_signals(df, short_window, long_window):
-    """Calculates signals based on dynamic moving average windows."""
-    df[f'SMA_{short_window}'] = df['close'].rolling(window=short_window).mean()
-    df[f'SMA_{long_window}'] = df['close'].rolling(window=long_window).mean()
-    
-    df['Golden_Cross'] = (df[f'SMA_{short_window}'] > df[f'SMA_{long_window}']) & \
-                         (df[f'SMA_{short_window}'].shift(1) <= df[f'SMA_{long_window}'].shift(1))
-    
-    df['Death_Cross'] = (df[f'SMA_{short_window}'] < df[f'SMA_{long_window}']) & \
-                        (df[f'SMA_{short_window}'].shift(1) >= df[f'SMA_{long_window}'].shift(1))
-    
-    df['Signal'] = 0
-    
-    buy_condition = df['Golden_Cross'] & (df['Safe_To_Trade'] == 1)
-    entering_blackout = (df['Safe_To_Trade'] == 0) & (df['Safe_To_Trade'].shift(1) == 1)
-    sell_condition = df['Death_Cross'] | entering_blackout
-    
-    df.loc[buy_condition, 'Signal'] = 1
-    df.loc[sell_condition, 'Signal'] = -1
-    
-    return df
+def get_market_regime_score():
+    """Calculates % of sample index trading above 200 SMA."""
+    sp500_sample = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'JPM', 'V', 'JNJ', 'WMT', 'PG']
+    above_200 = 0
+    for ticker in sp500_sample:
+        df = yf.download(ticker, period="1y", interval="1d", progress=False)
+        if not df.empty and df['Close'].iloc[-1] > df['Close'].rolling(200).mean().iloc[-1]:
+            above_200 += 1
+    return above_200 / len(sp500_sample)
 
 # ==========================================
-# 2. PARAMETER SWEEP
+# 2. PROFESSIONAL SCORING ENGINE
 # ==========================================
-
-def optimize_parameters(ticker, data):
-    """Finds optimal MA combination."""
-    short_windows = [20, 50, 80]
-    long_windows = [100, 150, 200]
+def calculate_professional_score(ticker, df, weekly_df, regime_score):
+    """Multi-factor institutional signal generator."""
+    if len(df) < 200 or len(weekly_df) < 40: return None
     
-    best_return = -np.inf
-    best_params = (50, 200)
+    # Volume Confirmation
+    vol_avg = df['Volume'].rolling(20).mean()
+    volume_surge = df['Volume'].iloc[-1] > (vol_avg.iloc[-1] * 1.5)
     
-    for short_win, long_win in itertools.product(short_windows, long_windows):
-        if short_win >= long_win:
-            continue
-            
-        test_df = data.copy()
-        test_df = generate_signals(test_df, short_win, long_win)
-        
-        # MODERN PANDAS OPTIMIZATION
-        test_df['Position'] = test_df['Signal'].replace(0, np.nan).ffill().fillna(0)
-        test_df['Daily_Return'] = test_df['close'].pct_change()
-        test_df['Strategy_Return'] = test_df['Position'].shift(1) * test_df['Daily_Return']
-        
-        cumulative_return = test_df['Strategy_Return'].cumsum().iloc[-1]
-        
-        if cumulative_return > best_return:
-            best_return = cumulative_return
-            best_params = (short_win, long_win)
-            
-    print(f"Optimal parameters for {ticker}: {best_params}")
-    return best_params
-
-# ==========================================
-# 3. ROBINHOOD AGENT
-# ==========================================
-
-class RobinhoodAgent:
-    def __init__(self):
-        self.api_key = os.getenv("RH_AGENTIC_API_KEY")
-        if not self.api_key:
-            print("WARNING: Robinhood API Key not found. Running in simulation mode.")
-            self.live = False
-        else:
-            self.live = True
-            
-    def get_current_position(self, ticker):
-        return 0
-
-    def execute_trade(self, ticker, action, quantity=1):
-        print(f"[{'LIVE' if self.live else 'SIMULATION'}] Executed: {action} {quantity} shares of {ticker}")
-        return True
-
-# ==========================================
-# 4. MAIN EXECUTION LOOP
-# ==========================================
-
-def run_trading_bot():
-    agent = RobinhoodAgent()
-    watchlist = ['NVDA', 'AAPL', 'TLYS'] 
+    # Confluence (Daily vs Weekly trend)
+    daily_trend = df['Close'].iloc[-1] > df['Close'].rolling(200).mean().iloc[-1]
+    weekly_trend = weekly_df['Close'].iloc[-1] > weekly_df['Close'].rolling(40).mean().iloc[-1]
+    confluence = (daily_trend == weekly_trend)
     
-    for ticker in watchlist:
-        print(f"\n--- Analyzing {ticker} ---")
-        
-        df = yf.download(ticker, period="2y", interval="1d", progress=False)
-        
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        if 'Adj Close' in df.columns:
-            df = df.drop(columns=['Adj Close'])
-        df.columns = [str(col).lower() for col in df.columns]
-        
-        df = apply_earnings_blackout(df, ticker)
-        best_short, best_long = optimize_parameters(ticker, df)
-        live_df = generate_signals(df, best_short, best_long)
-        
-        todays_signal = live_df['Signal'].iloc[-1]
-        todays_safe = live_df['Safe_To_Trade'].iloc[-1]
-        current_shares = agent.get_current_position(ticker)
-        
-        if todays_safe == 0:
-            print(f"Earnings Blackout active for {ticker}.")
-            if current_shares > 0:
-                agent.execute_trade(ticker, "SELL", current_shares)
-        elif todays_signal == 1 and current_shares == 0:
-            agent.execute_trade(ticker, "BUY", 10)
-        elif todays_signal == -1 and current_shares > 0:
-            agent.execute_trade(ticker, "SELL", current_shares)
-        else:
-            print(f"No actionable setup for {ticker} today.")
+    # ATR Volatility Score
+    atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
+    price_move = abs(df['Close'].iloc[-1] - df['Close'].iloc[-2])
+    vol_score = (price_move / atr) * 10
+    
+    # RSI for Mean Reversion
+    delta = df['Close'].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = delta.clip(upper=0).abs().rolling(14).mean()
+    rsi = 100 - (100 / (1 + (gain / loss)))
+    
+    # Scores
+    mom_score = 40 if (daily_trend and volume_surge and confluence) else 0
+    rev_score = 30 if (rsi.iloc[-1] < 30) else 0
+    
+    return (mom_score + rev_score + vol_score) * regime_score
 
+# ==========================================
+# 3. PARALLELIZED PIPELINE
+# ==========================================
+def process_symbol(ticker, regime_score):
+    try:
+        df = yf.download(ticker, period="1y", interval="1d", progress=False)
+        w_df = yf.download(ticker, period="2y", interval="1wk", progress=False)
+        score = calculate_professional_score(ticker, df, w_df, regime_score)
+        return {'ticker': ticker, 'score': score} if score else None
+    except: return None
+
+def generate_signals(ticker_list):
+    regime = get_market_regime_score()
+    print(f"Market Regime Score: {regime:.2f}")
+    
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        results = list(executor.map(lambda t: process_symbol(t, regime), ticker_list))
+    
+    df_rankings = pd.DataFrame([r for r in results if r is not None])
+    return df_rankings.sort_values(by='score', ascending=False)
+
+# ==========================================
+# 4. EXECUTION
+# ==========================================
 if __name__ == "__main__":
-    run_trading_bot()
+    # Add your list of 1000 tickers here
+    my_watchlist = ['AAPL', 'MSFT', 'NVDA', 'AMD', 'GOOGL', 'AMZN', 'META', 'TSLA'] 
+    
+    rankings = generate_signals(my_watchlist)
+    print("\n--- TOP 10 SWING SETUPS ---")
+    print(rankings.head(10))
