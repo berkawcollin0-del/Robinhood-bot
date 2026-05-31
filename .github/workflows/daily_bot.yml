@@ -1,0 +1,26 @@
+name: Trading Bot Daily Run
+on:
+  schedule:
+    # This runs at 20:50 UTC (adjust for market close time)
+    - cron: '50 20 * * 1-5'
+  workflow_dispatch: # Allows you to run it manually via the GitHub UI
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Bot
+        env:
+          RH_AGENTIC_API_KEY: ${{ secrets.RH_AGENTIC_API_KEY }}
+        run: python main.py
