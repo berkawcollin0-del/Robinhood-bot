@@ -7,7 +7,16 @@ from concurrent.futures import ThreadPoolExecutor
 # 1. MARKET REGIME FILTER
 # ==========================================
 def get_market_regime_score():
-    sp500_sample = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'JPM', 'V', 'JNJ', 'WMT', 'PG']
+    sp500_sample = [
+    'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'BRK-B', 'TSLA', 'AVGO', 'JPM',
+    'V', 'UNH', 'JNJ', 'PG', 'MA', 'HD', 'CVX', 'MRK', 'ABBV', 'KO', 'PEP', 'XOM',
+    'ADBE', 'COST', 'WMT', 'BAC', 'CRM', 'AMD', 'NFLX', 'CSCO', 'TMO', 'DHR', 'INTC',
+    'CMCSA', 'DIS', 'ABT', 'PFE', 'VZ', 'WFC', 'ORCL', 'LIN', 'UPS', 'INTU', 'MCD',
+    'QCOM', 'CAT', 'GE', 'BA', 'RTX', 'TXN', 'AMGN', 'HON', 'GS', 'IBM', 'PLD',
+    'AMAT', 'UNP', 'LOW', 'DE', 'NEE', 'AXP', 'ISRG', 'BKNG', 'SPGI', 'BLK', 'MDLZ',
+    'SYK', 'GILD', 'ADP', 'CB', 'MMC', 'LRCX', 'ADI', 'CI', 'BDX', 'REGN', 'C', 'EL',
+    'MU', 'CSX', 'FISV', 'SNPS', 'KLAC', 'PNC', 'ZTS', 'ITW', 'EOG', 'MCK', 'AON',
+    'SHW', 'PH', 'CNC', 'WM', 'MS', 'USB', 'ETN', 'FDX', 'APD', 'NSC', 'CDNS']
     above_200 = 0
     valid_count = 0
     for ticker in sp500_sample:
