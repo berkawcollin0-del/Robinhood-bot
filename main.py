@@ -1,3 +1,4 @@
+import ftplib
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -5,14 +6,38 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import warnings
 
-# Suppress yfinance warnings for clean terminal output
 warnings.filterwarnings('ignore')
 
-# Note: Ensure you have your tickers.py file with a WATCHLIST list variable in the same directory.
-from tickers import WATCHLIST
+# ==========================================
+# 1. LIVE WATCHLIST DOWNLOADER
+# ==========================================
+def get_live_nasdaq_watchlist():
+    """Downloads the absolute freshest active NASDAQ list directly into memory."""
+    print("Connecting to official NASDAQ server to fetch active tickers...")
+    try:
+        ftp = ftplib.FTP('ftp.nasdaqtrader.com')
+        ftp.login('anonymous', '')
+        lines = []
+        ftp.retrlines('RETR SymbolDirectory/nasdaqlisted.txt', lines.append)
+        ftp.quit()
+        
+        tickers = []
+        for line in lines[1:-1]:
+            data = line.split('|')
+            # Only pull standard, active non-test common stock
+            if len(data) > 3 and data[3] == 'N': 
+                symbol = data[0]
+                if len(symbol) <= 4 and symbol.isalpha():
+                    tickers.append(symbol)
+                    
+        print(f"Successfully loaded {len(tickers)} active NASDAQ tickers into memory.")
+        return tickers
+    except Exception as e:
+        print(f"Error downloading live list: {e}. Falling back to default top tickers.")
+        return ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'COST']
 
 # ==========================================
-# 1. MACRO & SAFETY GATES
+# 2. MACRO & SAFETY GATES
 # ==========================================
 def get_market_regime_score():
     sp500_sample = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'JPM', 'V', 'JNJ', 'WMT', 'PG']
@@ -39,7 +64,7 @@ def is_earnings_near(ticker):
     return False
 
 # ==========================================
-# 2. BI-DIRECTIONAL CONVICTION ENGINE
+# 3. BI-DIRECTIONAL CONVICTION ENGINE
 # ==========================================
 def calculate_conviction_score(ticker, df, weekly_df, regime_score):
     if len(df) < 200 or len(weekly_df) < 40 or is_earnings_near(ticker): return None
@@ -58,7 +83,6 @@ def calculate_conviction_score(ticker, df, weekly_df, regime_score):
     daily_bear = current_price < daily_sma
     weekly_bear = weekly_df['close'].iloc[-1] < weekly_sma
     
-    # Identify Macro Trend
     if daily_bull and weekly_bull: trade_dir = 'CALL'
     elif daily_bear and weekly_bear: trade_dir = 'PUT'
     else: return None
@@ -69,7 +93,6 @@ def calculate_conviction_score(ticker, df, weekly_df, regime_score):
     atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
     base_score = ((abs(current_price - df['close'].iloc[-2]) / atr) * 100)
     
-    # Setup Logic depending on Trend
     if trade_dir == 'CALL':
         res_level = df['high'].rolling(20).max().iloc[-2]
         if (current_price / res_level) > 1.05: return None
@@ -98,7 +121,7 @@ def calculate_conviction_score(ticker, df, weekly_df, regime_score):
     }
 
 # ==========================================
-# 3. OPTIONS LIQUIDITY ENGINE
+# 4. OPTIONS LIQUIDITY ENGINE
 # ==========================================
 def get_optimal_option(ticker, current_price, trade_dir):
     try:
@@ -139,7 +162,7 @@ def get_optimal_option(ticker, current_price, trade_dir):
     except: return None
 
 # ==========================================
-# 4. PIPELINE
+# 5. PIPELINE EXECUTOR
 # ==========================================
 def process_symbol(ticker, regime_score):
     try:
@@ -158,16 +181,18 @@ def process_symbol(ticker, regime_score):
 
 if __name__ == "__main__":
     print("Initializing Bi-Directional Options Scanner...")
+    
+    # Dynamically pull the tickers live right now
+    watchlist = get_live_nasdaq_watchlist()
     regime = get_market_regime_score()
+    
+    print("\nScanning market setups (This will take a few minutes)...")
     with ThreadPoolExecutor(max_workers=20) as executor:
-        results = list(executor.map(lambda t: process_symbol(t, regime), WATCHLIST))
+        results = list(executor.map(lambda t: process_symbol(t, regime), watchlist))
     
     rankings = pd.DataFrame([r for r in results if r is not None])
     if not rankings.empty:
-        # Sort from Best (Highest Score) to Worst
         rankings = rankings.sort_values(by='score', ascending=False)
-        
-        # Format the DataFrame for clean printing
         display_cols = ['ticker', 'score', 'type', 'pattern', 'opt_strike', 'opt_expiry', 'opt_premium', 'exit_plan']
         
         print("\n" + "="*95)
@@ -175,7 +200,6 @@ if __name__ == "__main__":
         print("="*95)
         print(rankings[display_cols].to_string(index=False))
         
-        # Save full data to CSV for your records
         rankings.to_csv('high_conviction_options.csv', index=False)
         print("\n>> Full scan data saved to 'high_conviction_options.csv'")
     else:
