@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import warnings
 
+# Suppress yfinance MultiIndex and parsing warnings for pristine terminal layout
 warnings.filterwarnings('ignore')
 
 # ==========================================
@@ -40,6 +41,7 @@ def get_live_nasdaq_watchlist():
 # 2. MACRO & SAFETY GATES
 # ==========================================
 def get_market_regime_score():
+    """Assesses overall index health across major heavily-weighted components."""
     sp500_sample = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'JPM', 'V', 'JNJ', 'WMT', 'PG']
     above_200 = 0
     valid_count = 0
@@ -54,6 +56,7 @@ def get_market_regime_score():
     return above_200 / valid_count if valid_count > 0 else 0.5
 
 def is_earnings_near(ticker):
+    """Gating mechanism to filter out catastrophic earnings gaps."""
     try:
         tkr = yf.Ticker(ticker)
         earnings = tkr.get_earnings_dates(limit=1)
@@ -64,7 +67,7 @@ def is_earnings_near(ticker):
     return False
 
 # ==========================================
-# 3. BI-DIRECTIONAL CONVICTION ENGINE
+# 3. ADVANCED CONVICTION ENGINE (V2)
 # ==========================================
 def calculate_conviction_score(ticker, df, weekly_df, regime_score):
     if len(df) < 200 or len(weekly_df) < 40 or is_earnings_near(ticker): return None
@@ -75,6 +78,9 @@ def calculate_conviction_score(ticker, df, weekly_df, regime_score):
         
     current_price = df['close'].iloc[-1]
     
+    # ------------------------------------------
+    # GATE A: Core Macro Trends 
+    # ------------------------------------------
     daily_sma = df['close'].rolling(200).mean().iloc[-1]
     weekly_sma = weekly_df['close'].rolling(40).mean().iloc[-1]
     
@@ -87,12 +93,18 @@ def calculate_conviction_score(ticker, df, weekly_df, regime_score):
     elif daily_bear and weekly_bear: trade_dir = 'PUT'
     else: return None
         
+    # ------------------------------------------
+    # GATE B: Institutional Volume Gate
+    # ------------------------------------------
     vol_avg = df['volume'].rolling(20).mean().iloc[-1]
     if df['volume'].iloc[-1] <= (vol_avg * 1.5): return None
     
     atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
     base_score = ((abs(current_price - df['close'].iloc[-2]) / atr) * 100)
     
+    # ------------------------------------------
+    # GATE C: Structure & Support Levels
+    # ------------------------------------------
     if trade_dir == 'CALL':
         res_level = df['high'].rolling(20).max().iloc[-2]
         if (current_price / res_level) > 1.05: return None
@@ -109,6 +121,52 @@ def calculate_conviction_score(ticker, df, weekly_df, regime_score):
         take_profit = current_price - (3.0 * atr)
 
     final_score = (base_score * 1.5) if is_retesting else base_score
+
+    # ==========================================
+    # ELITE QUALITY FILTERS (CONFLUENCE & COMPRESSION)
+    # ==========================================
+    
+    # FILTER 1: Bollinger Band Volatility Squeeze
+    df['bb_mid'] = df['close'].rolling(20).mean()
+    df['bb_upper'] = df['bb_mid'] + (2 * df['close'].rolling(20).std())
+    df['bb_lower'] = df['bb_mid'] - (2 * df['close'].rolling(20).std())
+    df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_mid']
+    
+    # Is the current consolidation tighter than 80% of the past 100 days?
+    is_squeezed = df['bb_width'].iloc[-1] < df['bb_width'].rolling(100).quantile(0.20).iloc[-1]
+    if is_squeezed:
+        final_score *= 1.3  # 30% Score Bonus for releasing trapped spring energy
+        pattern += " + SQUEEZE"
+
+    # FILTER 2: Moving Average Confluence (Algorithmic Floor Clustering)
+    ema_20 = df['close'].ewm(span=20).mean().iloc[-1]
+    ema_50 = df['close'].ewm(span=50).mean().iloc[-1]
+    
+    # Check spacing between short-term institutional averages
+    ma_spread = abs(ema_20 - ema_50) / ema_50
+    if ma_spread > 0.02: 
+        final_score *= 0.7  # 30% Penalty if moving averages are widely fanned out / messy
+    elif ma_spread < 0.007:
+        final_score *= 1.2  # 20% Bonus if MAs are beautifully tightly coiled together
+
+    # FILTER 3: Volume Profile (Clearing Price Nodes / Vacuum Check)
+    # Look at the last 30 trading days to construct a basic Volume-at-Price node profile
+    price_bins = pd.cut(df['close'].tail(30), bins=10)
+    volume_profile = df['volume'].tail(30).groupby(price_bins, observed=False).sum()
+    poc_bin = volume_profile.idxmax() # The price node with highest historic transaction density
+    
+    if trade_dir == 'CALL':
+        # High quality calls clear the historical sellers ceiling (price above high volume node)
+        if current_price > poc_bin.right:
+            final_score *= 1.25 # 25% Bonus for moving into an "Open Air" supply vacuum
+    else:
+        # High quality puts break under historical buyers floor (price below high volume node)
+        if current_price < poc_bin.left:
+            final_score *= 1.25 # 25% Bonus for dropping beneath historic floor absorption
+
+    # ------------------------------------------
+    # FINALIZATION
+    # ------------------------------------------
     exit_rule = f"SELL IF Stock Hits ${take_profit:.2f} (TP) or ${stop_loss:.2f} (SL)"
     
     return {
@@ -182,25 +240,28 @@ def process_symbol(ticker, regime_score):
 if __name__ == "__main__":
     print("Initializing Bi-Directional Options Scanner...")
     
-    # Dynamically pull the tickers live right now
+    # 1. Pull exchange live into memory
     watchlist = get_live_nasdaq_watchlist()
     regime = get_market_regime_score()
     
     print("\nScanning market setups (This will take a few minutes)...")
+    # 2. Concurrently analyze ticker data arrays
     with ThreadPoolExecutor(max_workers=20) as executor:
         results = list(executor.map(lambda t: process_symbol(t, regime), watchlist))
     
     rankings = pd.DataFrame([r for r in results if r is not None])
+    
+    # 3. Clean and sort outputs from highest structural conviction to lowest
     if not rankings.empty:
         rankings = rankings.sort_values(by='score', ascending=False)
         display_cols = ['ticker', 'score', 'type', 'pattern', 'opt_strike', 'opt_expiry', 'opt_premium', 'exit_plan']
         
         print("\n" + "="*95)
-        print(" TOP CONVICTION OPTIONS SETUPS ".center(95, "="))
+        print(" TOP QUALITY CONVICTION OPTIONS SETUPS ".center(95, "="))
         print("="*95)
         print(rankings[display_cols].to_string(index=False))
         
         rankings.to_csv('high_conviction_options.csv', index=False)
-        print("\n>> Full scan data saved to 'high_conviction_options.csv'")
+        print("\n>> All elite quality setups exported successfully to 'high_conviction_options.csv'")
     else:
-        print("No valid options setups passed the strict liquidity and volume gates today.")
+        print("No setups survived the elite quality gauntlet today.")
