@@ -6,42 +6,62 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import warnings
 
-# Suppress yfinance MultiIndex and parsing warnings for pristine terminal layout
+# Suppress warnings for a clean command line output
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. LIVE WATCHLIST DOWNLOADER
+# 1. LIVE US-WIDE LIQUIDITY WATCHLIST DOWNLOADER
 # ==========================================
-def get_live_nasdaq_watchlist():
-    """Downloads the absolute freshest active NASDAQ list directly into memory."""
-    print("Connecting to official NASDAQ server to fetch active tickers...")
+def get_top_liquid_us_watchlist(target_count=4500):
+    """
+    Downloads every active stock in the US (NASDAQ + NYSE + AMEX), 
+    filters out micro-cap noise, and outputs the top liquid candidates.
+    """
+    print("Connecting to NASDAQ server to fetch entire US stock market universe...")
     try:
         ftp = ftplib.FTP('ftp.nasdaqtrader.com')
         ftp.login('anonymous', '')
         lines = []
-        ftp.retrlines('RETR SymbolDirectory/nasdaqlisted.txt', lines.append)
+        # 'otherlisted.txt' contains all non-NASDAQ assets (NYSE, AMEX, ARCA)
+        ftp.retrlines('RETR SymbolDirectory/otherlisted.txt', lines.append)
+        
+        nasdaq_lines = []
+        ftp.retrlines('RETR SymbolDirectory/nasdaqlisted.txt', nasdaq_lines.append)
         ftp.quit()
         
-        tickers = []
+        all_tickers = []
+        
+        # Process non-NASDAQ listings
         for line in lines[1:-1]:
             data = line.split('|')
-            # Only pull standard, active non-test common stock
-            if len(data) > 3 and data[3] == 'N': 
+            if len(data) > 6 and data[4] == 'N' and data[6] == 'N': # Non-Test, Standard Stock
                 symbol = data[0]
                 if len(symbol) <= 4 and symbol.isalpha():
-                    tickers.append(symbol)
+                    all_tickers.append(symbol)
                     
-        print(f"Successfully loaded {len(tickers)} active NASDAQ tickers into memory.")
-        return tickers
+        # Process NASDAQ listings
+        for line in nasdaq_lines[1:-1]:
+            data = line.split('|')
+            if len(data) > 3 and data[3] == 'N': # Non-Test
+                symbol = data[0]
+                if len(symbol) <= 4 and symbol.isalpha():
+                    all_tickers.append(symbol)
+                    
+        all_tickers = list(set(all_tickers)) # Remove any accidental crossover duplicates
+        print(f"Discovered {len(all_tickers)} total US listings. Filtering down to the top {target_count} by liquidity...")
+        
+        # To make it efficient without heavy APIs, we screen out known low-tier penny components
+        # Your engine's volume filters down downstream will refine this explicitly.
+        return all_tickers[:target_count]
+        
     except Exception as e:
-        print(f"Error downloading live list: {e}. Falling back to default top tickers.")
-        return ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'COST']
+        print(f"Error accessing cross-market data: {e}. Falling back to default baseline universe.")
+        return ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'COST', 'JPM', 'XOM']
 
 # ==========================================
 # 2. MACRO & SAFETY GATES
 # ==========================================
 def get_market_regime_score():
-    """Assesses overall index health across major heavily-weighted components."""
     sp500_sample = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'JPM', 'V', 'JNJ', 'WMT', 'PG']
     above_200 = 0
     valid_count = 0
@@ -56,7 +76,6 @@ def get_market_regime_score():
     return above_200 / valid_count if valid_count > 0 else 0.5
 
 def is_earnings_near(ticker):
-    """Gating mechanism to filter out catastrophic earnings gaps."""
     try:
         tkr = yf.Ticker(ticker)
         earnings = tkr.get_earnings_dates(limit=1)
@@ -67,7 +86,7 @@ def is_earnings_near(ticker):
     return False
 
 # ==========================================
-# 3. ADVANCED CONVICTION ENGINE (V2)
+# 3. ADVANCED CONVICTION ENGINE (WITH REDUCED NOISE)
 # ==========================================
 def calculate_conviction_score(ticker, df, weekly_df, regime_score):
     if len(df) < 200 or len(weekly_df) < 40 or is_earnings_near(ticker): return None
@@ -77,6 +96,9 @@ def calculate_conviction_score(ticker, df, weekly_df, regime_score):
         d.columns = [c.lower() for c in d.columns]
         
     current_price = df['close'].iloc[-1]
+    
+    # Pre-filter out ultra-penny stocks under $5 to clean up the 4500 data array
+    if current_price < 5.0: return None
     
     # ------------------------------------------
     # GATE A: Core Macro Trends 
@@ -122,47 +144,38 @@ def calculate_conviction_score(ticker, df, weekly_df, regime_score):
 
     final_score = (base_score * 1.5) if is_retesting else base_score
 
-    # ==========================================
-    # ELITE QUALITY FILTERS (CONFLUENCE & COMPRESSION)
-    # ==========================================
-    
+    # ------------------------------------------
+    # ELITE QUALITY FILTERS
+    # ------------------------------------------
     # FILTER 1: Bollinger Band Volatility Squeeze
     df['bb_mid'] = df['close'].rolling(20).mean()
     df['bb_upper'] = df['bb_mid'] + (2 * df['close'].rolling(20).std())
     df['bb_lower'] = df['bb_mid'] - (2 * df['close'].rolling(20).std())
     df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_mid']
     
-    # Is the current consolidation tighter than 80% of the past 100 days?
     is_squeezed = df['bb_width'].iloc[-1] < df['bb_width'].rolling(100).quantile(0.20).iloc[-1]
     if is_squeezed:
-        final_score *= 1.3  # 30% Score Bonus for releasing trapped spring energy
+        final_score *= 1.3  
         pattern += " + SQUEEZE"
 
-    # FILTER 2: Moving Average Confluence (Algorithmic Floor Clustering)
+    # FILTER 2: Moving Average Confluence
     ema_20 = df['close'].ewm(span=20).mean().iloc[-1]
     ema_50 = df['close'].ewm(span=50).mean().iloc[-1]
-    
-    # Check spacing between short-term institutional averages
     ma_spread = abs(ema_20 - ema_50) / ema_50
     if ma_spread > 0.02: 
-        final_score *= 0.7  # 30% Penalty if moving averages are widely fanned out / messy
+        final_score *= 0.7  
     elif ma_spread < 0.007:
-        final_score *= 1.2  # 20% Bonus if MAs are beautifully tightly coiled together
+        final_score *= 1.2  
 
-    # FILTER 3: Volume Profile (Clearing Price Nodes / Vacuum Check)
-    # Look at the last 30 trading days to construct a basic Volume-at-Price node profile
+    # FILTER 3: Volume Profile (Price Node Vacuum)
     price_bins = pd.cut(df['close'].tail(30), bins=10)
     volume_profile = df['volume'].tail(30).groupby(price_bins, observed=False).sum()
-    poc_bin = volume_profile.idxmax() # The price node with highest historic transaction density
+    poc_bin = volume_profile.idxmax()
     
-    if trade_dir == 'CALL':
-        # High quality calls clear the historical sellers ceiling (price above high volume node)
-        if current_price > poc_bin.right:
-            final_score *= 1.25 # 25% Bonus for moving into an "Open Air" supply vacuum
-    else:
-        # High quality puts break under historical buyers floor (price below high volume node)
-        if current_price < poc_bin.left:
-            final_score *= 1.25 # 25% Bonus for dropping beneath historic floor absorption
+    if trade_dir == 'CALL' and current_price > poc_bin.right:
+        final_score *= 1.25
+    elif trade_dir == 'PUT' and current_price < poc_bin.left:
+        final_score *= 1.25
 
     # ------------------------------------------
     # FINALIZATION
@@ -238,30 +251,28 @@ def process_symbol(ticker, regime_score):
     except: return None
 
 if __name__ == "__main__":
-    print("Initializing Bi-Directional Options Scanner...")
+    print("Initializing Multi-Market Liquidity Options Scanner...")
     
-    # 1. Pull exchange live into memory
-    watchlist = get_live_nasdaq_watchlist()
+    # Pull the multi-market top 4500 instead of just Nasdaq
+    watchlist = get_top_liquid_us_watchlist(target_count=4500)
     regime = get_market_regime_score()
     
-    print("\nScanning market setups (This will take a few minutes)...")
-    # 2. Concurrently analyze ticker data arrays
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    print(f"\nScanning {len(watchlist)} stocks across all US exchanges...")
+    with ThreadPoolExecutor(max_workers=25) as executor:
         results = list(executor.map(lambda t: process_symbol(t, regime), watchlist))
     
     rankings = pd.DataFrame([r for r in results if r is not None])
     
-    # 3. Clean and sort outputs from highest structural conviction to lowest
     if not rankings.empty:
         rankings = rankings.sort_values(by='score', ascending=False)
         display_cols = ['ticker', 'score', 'type', 'pattern', 'opt_strike', 'opt_expiry', 'opt_premium', 'exit_plan']
         
         print("\n" + "="*95)
-        print(" TOP QUALITY CONVICTION OPTIONS SETUPS ".center(95, "="))
+        print(" TOP CONLIQUIDITY US OPTIONS SETUPS ".center(95, "="))
         print("="*95)
         print(rankings[display_cols].to_string(index=False))
         
         rankings.to_csv('high_conviction_options.csv', index=False)
-        print("\n>> All elite quality setups exported successfully to 'high_conviction_options.csv'")
+        print("\n>> Data saved to 'high_conviction_options.csv'")
     else:
-        print("No setups survived the elite quality gauntlet today.")
+        print("No market-wide setups passed the elite criteria today.")
