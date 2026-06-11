@@ -126,9 +126,9 @@ def calculate_conviction_score(ticker, df, weekly_df):
     }
 
 # ==========================================
-# 4. UNUSUAL OPTIONS ACTIVITY & NEWS ENGINE
+# 4. UNUSUAL OPTIONS ACTIVITY ENGINE
 # ==========================================
-def detect_uoa_and_news(ticker, current_price, trade_dir):
+def detect_uoa(ticker, current_price, trade_dir):
     try:
         tkr = yf.Ticker(ticker)
         dates = tkr.options
@@ -161,14 +161,6 @@ def detect_uoa_and_news(ticker, current_price, trade_dir):
         if not uoa_alerts: return None
         best_alert = sorted(uoa_alerts, key=lambda x: x['vol_to_oi_ratio'], reverse=True)[0]
         
-        news = tkr.news
-        latest_news = []
-        if news:
-            for n in news[:2]:
-                title = n.get('title', '')
-                if title: latest_news.append(title.strip())
-        
-        best_alert['latest_news'] = " | ".join(latest_news) if latest_news else "No recent headlines found."
         return best_alert
     except: return None
 
@@ -183,25 +175,21 @@ def process_symbol(ticker):
         setup = calculate_conviction_score(ticker, df, w_df)
         
         if setup is not None:
-            uoa_data = detect_uoa_and_news(ticker, setup['stock_entry'], setup['type'])
+            uoa_data = detect_uoa(ticker, setup['stock_entry'], setup['type'])
             if uoa_data:
                 setup.update(uoa_data)
                 
-                # Calculate 1-100 Confidence Score
+                # Calculate 1-100 Confidence Score (Recalibrated for No News)
                 confidence = 0
                 
-                # 1. Technicals (Max 40 pts)
-                if "Double" in setup['chart_pattern']: confidence += 40
-                elif "Channel" in setup['chart_pattern']: confidence += 30
-                else: confidence += 15
+                # 1. Technicals (Max 50 pts)
+                if "Double" in setup['chart_pattern']: confidence += 50
+                elif "Channel" in setup['chart_pattern']: confidence += 35
+                else: confidence += 20
                 
-                # 2. Options Flow (Max 40 pts - caps at 10x Vol/OI ratio)
-                flow_score = min(40, (setup['vol_to_oi_ratio'] * 4))
+                # 2. Options Flow (Max 50 pts - caps at 10x Vol/OI ratio)
+                flow_score = min(50, (setup['vol_to_oi_ratio'] * 5))
                 confidence += flow_score
-                
-                # 3. News Catalyst (Max 20 pts)
-                if setup['latest_news'] != "No recent headlines found.":
-                    confidence += 20
                 
                 # Ensure bounded between 1 and 100
                 setup['confidence_1_100'] = int(min(100, max(1, confidence)))
@@ -211,11 +199,11 @@ def process_symbol(ticker):
     except: return None
 
 if __name__ == "__main__":
-    print("Initializing Multi-Exchange Chart Pattern, News, & UOA Scanner...")
+    print("Initializing Multi-Exchange Chart Pattern & UOA Scanner...")
     
     watchlist = get_top_liquid_us_watchlist(target_count=1000)
     
-    print(f"\nScanning {len(watchlist)} stocks for aligned Patterns + News + UOA...")
+    print(f"\nScanning {len(watchlist)} stocks for aligned Patterns + UOA...")
     with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(process_symbol, watchlist))
     
@@ -228,15 +216,15 @@ if __name__ == "__main__":
         pd.set_option('display.max_colwidth', 35)
         display_cols = [
             'ticker', 'type', 'confidence_1_100', 'chart_pattern', 
-            'opt_strike', 'opt_expiry', 'vol_to_oi_ratio', 'latest_news'
+            'opt_strike', 'opt_expiry', 'vol_to_oi_ratio'
         ]
         
-        print("\n" + "="*125)
-        print(" HIGH CONVICTION SETUPS (SCORED 1-100) ".center(125, "="))
-        print("="*125)
+        print("\n" + "="*100)
+        print(" HIGH CONVICTION SETUPS (SCORED 1-100) ".center(100, "="))
+        print("="*100)
         print(rankings[display_cols].to_string(index=False))
         
         rankings.to_csv('scored_confirmed_trades.csv', index=False)
         print("\n>> Full dataset exported to 'scored_confirmed_trades.csv'")
     else:
-        print("No tickers established confluence between patterns, options flow, and news today.")
+        print("No tickers established confluence between patterns and options flow today.")
