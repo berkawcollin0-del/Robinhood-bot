@@ -13,10 +13,6 @@ warnings.filterwarnings('ignore')
 # 1. LIVE US-WIDE LIQUIDITY WATCHLIST DOWNLOADER
 # ==========================================
 def get_top_liquid_us_watchlist(target_count=1000):
-    """
-    Downloads active stocks in the US across NASDAQ, NYSE, and AMEX.
-    Target count increased to 1000 for a broader market scan.
-    """
     print("Connecting to NASDAQ server to fetch US stock market universe...")
     try:
         ftp = ftplib.FTP('ftp.nasdaqtrader.com')
@@ -49,13 +45,9 @@ def get_top_liquid_us_watchlist(target_count=1000):
         return ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'COST', 'JPM', 'XOM']
 
 # ==========================================
-# 2. ADVANCED CHART PATTERN SCANNER (ALGORITHMIC)
+# 2. ADVANCED CHART PATTERN SCANNER
 # ==========================================
 def scan_chart_patterns(df):
-    """
-    Programmatically detects classical chart patterns: 
-    Double Bottoms, Double Tops, and Range Channel Breakouts.
-    """
     if len(df) < 60:
         return "No Pattern", 1.0
 
@@ -63,46 +55,34 @@ def scan_chart_patterns(df):
     high = df['high'].values
     low = df['low'].values
     
-    # 1. Range Breakout / Breakdown (Donchian Channels)
-    # Checks if the current price is breaking out of a 20-day consolidative range
     prev_20_max = np.max(high[-21:-1])
     prev_20_min = np.min(low[-21:-1])
     current_close = close[-1]
     
-    if current_close > prev_20_max:
-        return "Channel Breakout (Bullish)", 1.3
-    elif current_close < prev_20_min:
-        return "Channel Breakdown (Bearish)", 1.3
+    if current_close > prev_20_max: return "Channel Breakout", 1.3
+    elif current_close < prev_20_min: return "Channel Breakdown", 1.3
 
-    # 2. Algorithmic Double Bottom / Double Top Detection
-    # Look back over a 45-day window to locate local minima/maxima
     lookback = 45
     window_lows = low[-lookback:]
     window_highs = high[-lookback:]
     
-    # Identify local troughs (points lower than surrounding 5 days)
     troughs = []
     for i in range(5, len(window_lows) - 5):
-        if window_lows[i] == np.min(window_lows[i-5:i+6]):
-            troughs.append(window_lows[i])
+        if window_lows[i] == np.min(window_lows[i-5:i+6]): troughs.append(window_lows[i])
             
-    # Identify local peaks (points higher than surrounding 5 days)
     peaks = []
     for i in range(5, len(window_highs) - 5):
-        if window_highs[i] == np.max(window_highs[i-5:i+6]):
-            peaks.append(window_highs[i])
+        if window_highs[i] == np.max(window_highs[i-5:i+6]): peaks.append(window_highs[i])
 
-    # Validate Double Bottom: Two distinct troughs within 1.5% price proximity
     if len(troughs) >= 2:
         if abs(troughs[-1] - troughs[-2]) / troughs[-2] < 0.015:
             if current_close > troughs[-1] * 1.01:
-                return "Double Bottom (Bullish Reversal)", 1.4
+                return "Double Bottom", 1.4
 
-    # Validate Double Top: Two distinct peaks within 1.5% price proximity
     if len(peaks) >= 2:
         if abs(peaks[-1] - peaks[-2]) / peaks[-2] < 0.015:
             if current_close < peaks[-1] * 0.99:
-                return "Double Top (Bearish Reversal)", 1.4
+                return "Double Top", 1.4
 
     return "Trend Continuation", 1.0
 
@@ -119,7 +99,6 @@ def calculate_conviction_score(ticker, df, weekly_df):
     current_price = df['close'].iloc[-1]
     if current_price < 5.0: return None
     
-    # Determine overall structural bias via moving averages
     daily_sma = df['close'].rolling(200).mean().iloc[-1]
     weekly_sma = weekly_df['close'].rolling(40).mean().iloc[-1]
     
@@ -132,24 +111,17 @@ def calculate_conviction_score(ticker, df, weekly_df):
     elif daily_bear and weekly_bear: trade_dir = 'PUT'
     else: return None
         
-    # Programmatic Chart Pattern Scanning
     pattern_name, pattern_multiplier = scan_chart_patterns(df)
     
-    # Strict Alignment Filter: Prevent taking CALLs on Bearish patterns or PUTs on Bullish patterns
-    if trade_dir == 'CALL' and "Bearish" in pattern_name: return None
-    if trade_dir == 'PUT' and "Bullish" in pattern_name: return None
-    
-    atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
-    base_score = ((abs(current_price - df['close'].iloc[-2]) / atr) * 100)
-    
-    # Scale score dynamically based on technical pattern strength
-    final_score = base_score * pattern_multiplier
+    if trade_dir == 'CALL' and "Breakdown" in pattern_name: return None
+    if trade_dir == 'PUT' and "Breakout" in pattern_name: return None
+    if trade_dir == 'CALL' and "Top" in pattern_name: return None
+    if trade_dir == 'PUT' and "Bottom" in pattern_name: return None
 
     return {
         'ticker': ticker,
         'type': trade_dir,
         'chart_pattern': pattern_name,
-        'score': round(final_score, 1),
         'stock_entry': round(current_price, 2)
     }
 
@@ -163,7 +135,7 @@ def detect_uoa_and_news(ticker, current_price, trade_dir):
         if not dates: return None
         
         uoa_alerts = []
-        for date in dates[:3]: # Near term expirations (0-45 Days to Expiry)
+        for date in dates[:3]:
             chain = tkr.option_chain(date)
             opts = chain.calls if trade_dir == 'CALL' else chain.puts
             if opts.empty: continue
@@ -189,7 +161,6 @@ def detect_uoa_and_news(ticker, current_price, trade_dir):
         if not uoa_alerts: return None
         best_alert = sorted(uoa_alerts, key=lambda x: x['vol_to_oi_ratio'], reverse=True)[0]
         
-        # Scrape Live News Headlines
         news = tkr.news
         latest_news = []
         if news:
@@ -202,7 +173,7 @@ def detect_uoa_and_news(ticker, current_price, trade_dir):
     except: return None
 
 # ==========================================
-# 5. PIPELINE EXECUTOR
+# 5. PIPELINE EXECUTOR & SCORING COMPILER
 # ==========================================
 def process_symbol(ticker):
     try:
@@ -215,6 +186,26 @@ def process_symbol(ticker):
             uoa_data = detect_uoa_and_news(ticker, setup['stock_entry'], setup['type'])
             if uoa_data:
                 setup.update(uoa_data)
+                
+                # Calculate 1-100 Confidence Score
+                confidence = 0
+                
+                # 1. Technicals (Max 40 pts)
+                if "Double" in setup['chart_pattern']: confidence += 40
+                elif "Channel" in setup['chart_pattern']: confidence += 30
+                else: confidence += 15
+                
+                # 2. Options Flow (Max 40 pts - caps at 10x Vol/OI ratio)
+                flow_score = min(40, (setup['vol_to_oi_ratio'] * 4))
+                confidence += flow_score
+                
+                # 3. News Catalyst (Max 20 pts)
+                if setup['latest_news'] != "No recent headlines found.":
+                    confidence += 20
+                
+                # Ensure bounded between 1 and 100
+                setup['confidence_1_100'] = int(min(100, max(1, confidence)))
+                
                 return setup
         return None
     except: return None
@@ -222,28 +213,30 @@ def process_symbol(ticker):
 if __name__ == "__main__":
     print("Initializing Multi-Exchange Chart Pattern, News, & UOA Scanner...")
     
-    # Scaled up to scan 1,000 symbols across exchanges
     watchlist = get_top_liquid_us_watchlist(target_count=1000)
     
     print(f"\nScanning {len(watchlist)} stocks for aligned Patterns + News + UOA...")
-    # Workers throttled to 8 to avoid HTTP 429 Rate Limit blocks during large 1k iteration loops
     with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(process_symbol, watchlist))
     
     rankings = pd.DataFrame([r for r in results if r is not None])
     
     if not rankings.empty:
-        rankings = rankings.sort_values(by='vol_to_oi_ratio', ascending=False)
+        # Sort by the new 1-100 confidence score
+        rankings = rankings.sort_values(by='confidence_1_100', ascending=False)
         
-        pd.set_option('display.max_colwidth', 40)
-        display_cols = ['ticker', 'type', 'chart_pattern', 'opt_strike', 'vol_to_oi_ratio', 'latest_news']
+        pd.set_option('display.max_colwidth', 35)
+        display_cols = [
+            'ticker', 'type', 'confidence_1_100', 'chart_pattern', 
+            'opt_strike', 'opt_expiry', 'vol_to_oi_ratio', 'latest_news'
+        ]
         
-        print("\n" + "="*115)
-        print(" TRI-CONFIRMED SETUPS: CHART PATTERN + UOA + NEWS ".center(115, "="))
-        print("="*115)
+        print("\n" + "="*125)
+        print(" HIGH CONVICTION SETUPS (SCORED 1-100) ".center(125, "="))
+        print("="*125)
         print(rankings[display_cols].to_string(index=False))
         
-        rankings.to_csv('tri_confirmed_trades.csv', index=False)
-        print("\n>> Full dataset exported to 'tri_confirmed_trades.csv'")
+        rankings.to_csv('scored_confirmed_trades.csv', index=False)
+        print("\n>> Full dataset exported to 'scored_confirmed_trades.csv'")
     else:
         print("No tickers established confluence between patterns, options flow, and news today.")
