@@ -165,7 +165,7 @@ def detect_uoa(ticker, current_price, trade_dir):
     except: return None
 
 # ==========================================
-# 5. PIPELINE EXECUTOR & SCORING COMPILER
+# 5. PIPELINE EXECUTOR & DUAL-SCORING COMPILER
 # ==========================================
 def process_symbol(ticker):
     try:
@@ -179,63 +179,70 @@ def process_symbol(ticker):
             if uoa_data:
                 setup.update(uoa_data)
                 
-                # ==========================================
-                # TECHNICAL-DOMINANT SCORING W/ ANOMALY OVERRIDE
-                # ==========================================
-                confidence = 0
+                # ------------------------------------------
+                # ENGINE A: BALANCED (50/50) SCORING
+                # ------------------------------------------
+                conf_50 = 0
+                if "Double" in setup['chart_pattern']: conf_50 += 50
+                elif "Channel" in setup['chart_pattern']: conf_50 += 35
+                else: conf_50 += 20
                 
-                # 1. Technicals (Max 70 pts)
-                if "Double" in setup['chart_pattern']: confidence += 70
-                elif "Channel" in setup['chart_pattern']: confidence += 45
-                else: confidence += 25
+                flow_score_50 = min(50, (setup['vol_to_oi_ratio'] * 5))
+                conf_50 += flow_score_50
+                setup['score_50_50'] = int(min(100, max(1, conf_50)))
                 
-                # 2. Options Flow "Green Light" (Base Max 30 pts)
-                flow_score = min(30, (setup['vol_to_oi_ratio'] * 5))
-                confidence += flow_score
+                # ------------------------------------------
+                # ENGINE B: TECHNICAL-DOMINANT (70/30) W/ OVERRIDE
+                # ------------------------------------------
+                conf_70 = 0
+                if "Double" in setup['chart_pattern']: conf_70 += 70
+                elif "Channel" in setup['chart_pattern']: conf_70 += 45
+                else: conf_70 += 25
                 
-                # 3. EXTREME ANOMALY OVERRIDE (Bonus Points & Labeling)
+                flow_score_70 = min(30, (setup['vol_to_oi_ratio'] * 5))
+                conf_70 += flow_score_70
+                
+                # Check for the 10x Vol/OI Extreme Anomaly
                 if setup['vol_to_oi_ratio'] >= 10.0:
-                    confidence += 25 
+                    conf_70 += 25
                     setup['anomaly_flag'] = "⚠️ ANOMALY DETECTED"
                 else:
                     setup['anomaly_flag'] = "-"
-                
-                # Ensure bounded between 1 and 100
-                setup['confidence_1_100'] = int(min(100, max(1, confidence)))
+                    
+                setup['score_70_30'] = int(min(100, max(1, conf_70)))
                 
                 return setup
         return None
     except: return None
 
 if __name__ == "__main__":
-    print("Initializing Technical-Dominant Scanner w/ UOA Anomaly Detection...")
+    print("Initializing Dual-Scoring Engine (50/50 Balanced vs 70/30 Technical-Dominant)...")
     
     watchlist = get_top_liquid_us_watchlist(target_count=1000)
     
-    print(f"\nScanning {len(watchlist)} stocks for aligned Patterns + UOA...")
+    print(f"\nScanning {len(watchlist)} stocks for aligned setups...")
     with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(process_symbol, watchlist))
     
     rankings = pd.DataFrame([r for r in results if r is not None])
     
     if not rankings.empty:
-        # Sort by the new 1-100 confidence score
-        rankings = rankings.sort_values(by='confidence_1_100', ascending=False)
+        # Default sort by the 70/30 engine score
+        rankings = rankings.sort_values(by='score_70_30', ascending=False)
         
         pd.set_option('display.max_colwidth', 45)
         
-        # Added anomaly_flag to the printout display columns
         display_cols = [
-            'ticker', 'type', 'confidence_1_100', 'anomaly_flag', 'chart_pattern', 
-            'opt_strike', 'opt_expiry', 'vol_to_oi_ratio'
+            'ticker', 'type', 'score_50_50', 'score_70_30', 'anomaly_flag', 
+            'chart_pattern', 'opt_strike', 'opt_expiry', 'vol_to_oi_ratio'
         ]
         
-        print("\n" + "="*125)
-        print(" HIGH CONVICTION SETUPS (SCORED 1-100) ".center(125, "="))
-        print("="*125)
+        print("\n" + "="*135)
+        print(" CROSS-ENGINE CONFLUENCE COMPARISON TABLE ".center(135, "="))
+        print("="*135)
         print(rankings[display_cols].to_string(index=False))
         
-        rankings.to_csv('scored_confirmed_trades.csv', index=False)
-        print("\n>> Full dataset exported to 'scored_confirmed_trades.csv'")
+        rankings.to_csv('dual_scored_trades.csv', index=False)
+        print("\n>> Full dataset exported to 'dual_scored_trades.csv'")
     else:
         print("No tickers established confluence between patterns and options flow today.")
