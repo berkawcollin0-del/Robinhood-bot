@@ -179,17 +179,26 @@ def process_symbol(ticker):
             if uoa_data:
                 setup.update(uoa_data)
                 
-                # Calculate 1-100 Confidence Score (Recalibrated for No News)
+                # ==========================================
+                # TECHNICAL-DOMINANT SCORING W/ ANOMALY OVERRIDE
+                # ==========================================
                 confidence = 0
                 
-                # 1. Technicals (Max 50 pts)
-                if "Double" in setup['chart_pattern']: confidence += 50
-                elif "Channel" in setup['chart_pattern']: confidence += 35
-                else: confidence += 20
+                # 1. Technicals (Max 70 pts)
+                if "Double" in setup['chart_pattern']: confidence += 70
+                elif "Channel" in setup['chart_pattern']: confidence += 45
+                else: confidence += 25
                 
-                # 2. Options Flow (Max 50 pts - caps at 10x Vol/OI ratio)
-                flow_score = min(50, (setup['vol_to_oi_ratio'] * 5))
+                # 2. Options Flow "Green Light" (Base Max 30 pts)
+                flow_score = min(30, (setup['vol_to_oi_ratio'] * 5))
                 confidence += flow_score
+                
+                # 3. EXTREME ANOMALY OVERRIDE (Bonus Points & Labeling)
+                if setup['vol_to_oi_ratio'] >= 10.0:
+                    confidence += 25 
+                    setup['anomaly_flag'] = "⚠️ ANOMALY DETECTED"
+                else:
+                    setup['anomaly_flag'] = "-"
                 
                 # Ensure bounded between 1 and 100
                 setup['confidence_1_100'] = int(min(100, max(1, confidence)))
@@ -199,7 +208,7 @@ def process_symbol(ticker):
     except: return None
 
 if __name__ == "__main__":
-    print("Initializing Multi-Exchange Chart Pattern & UOA Scanner...")
+    print("Initializing Technical-Dominant Scanner w/ UOA Anomaly Detection...")
     
     watchlist = get_top_liquid_us_watchlist(target_count=1000)
     
@@ -213,15 +222,17 @@ if __name__ == "__main__":
         # Sort by the new 1-100 confidence score
         rankings = rankings.sort_values(by='confidence_1_100', ascending=False)
         
-        pd.set_option('display.max_colwidth', 35)
+        pd.set_option('display.max_colwidth', 45)
+        
+        # Added anomaly_flag to the printout display columns
         display_cols = [
-            'ticker', 'type', 'confidence_1_100', 'chart_pattern', 
+            'ticker', 'type', 'confidence_1_100', 'anomaly_flag', 'chart_pattern', 
             'opt_strike', 'opt_expiry', 'vol_to_oi_ratio'
         ]
         
-        print("\n" + "="*100)
-        print(" HIGH CONVICTION SETUPS (SCORED 1-100) ".center(100, "="))
-        print("="*100)
+        print("\n" + "="*125)
+        print(" HIGH CONVICTION SETUPS (SCORED 1-100) ".center(125, "="))
+        print("="*125)
         print(rankings[display_cols].to_string(index=False))
         
         rankings.to_csv('scored_confirmed_trades.csv', index=False)
