@@ -12,10 +12,10 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. LIVE US-WIDE LIQUIDITY WATCHLIST DOWNLOADER
 # ==========================================
-def get_top_liquid_us_watchlist(target_count=300):
+def get_top_liquid_us_watchlist(target_count=1000):
     """
-    Downloads active stocks in the US. 
-    Target count optimized to balance pattern processing and options API limits.
+    Downloads active stocks in the US across NASDAQ, NYSE, and AMEX.
+    Target count increased to 1000 for a broader market scan.
     """
     print("Connecting to NASDAQ server to fetch US stock market universe...")
     try:
@@ -54,7 +54,7 @@ def get_top_liquid_us_watchlist(target_count=300):
 def scan_chart_patterns(df):
     """
     Programmatically detects classical chart patterns: 
-    Double Bottoms, Double Tops, and Range Breakouts.
+    Double Bottoms, Double Tops, and Range Channel Breakouts.
     """
     if len(df) < 60:
         return "No Pattern", 1.0
@@ -94,16 +94,13 @@ def scan_chart_patterns(df):
 
     # Validate Double Bottom: Two distinct troughs within 1.5% price proximity
     if len(troughs) >= 2:
-        # Check the last two identified distinct support levels
         if abs(troughs[-1] - troughs[-2]) / troughs[-2] < 0.015:
-            # Confirm price is moving up off the second bottom
             if current_close > troughs[-1] * 1.01:
                 return "Double Bottom (Bullish Reversal)", 1.4
 
     # Validate Double Top: Two distinct peaks within 1.5% price proximity
     if len(peaks) >= 2:
         if abs(peaks[-1] - peaks[-2]) / peaks[-2] < 0.015:
-            # Confirm price is moving down off the second top
             if current_close < peaks[-1] * 0.99:
                 return "Double Top (Bearish Reversal)", 1.4
 
@@ -138,7 +135,7 @@ def calculate_conviction_score(ticker, df, weekly_df):
     # Programmatic Chart Pattern Scanning
     pattern_name, pattern_multiplier = scan_chart_patterns(df)
     
-    # Strict Alignment Filter: Prevent taking CALLs on Double Tops or PUTs on Double Bottoms
+    # Strict Alignment Filter: Prevent taking CALLs on Bearish patterns or PUTs on Bullish patterns
     if trade_dir == 'CALL' and "Bearish" in pattern_name: return None
     if trade_dir == 'PUT' and "Bullish" in pattern_name: return None
     
@@ -225,10 +222,12 @@ def process_symbol(ticker):
 if __name__ == "__main__":
     print("Initializing Multi-Exchange Chart Pattern, News, & UOA Scanner...")
     
-    watchlist = get_top_liquid_us_watchlist(target_count=300)
+    # Scaled up to scan 1,000 symbols across exchanges
+    watchlist = get_top_liquid_us_watchlist(target_count=1000)
     
     print(f"\nScanning {len(watchlist)} stocks for aligned Patterns + News + UOA...")
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    # Workers throttled to 8 to avoid HTTP 429 Rate Limit blocks during large 1k iteration loops
+    with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(process_symbol, watchlist))
     
     rankings = pd.DataFrame([r for r in results if r is not None])
