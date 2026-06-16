@@ -1,248 +1,194 @@
-import ftplib
-import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor
-import warnings
 
-# Suppress warnings for a clean command line output
-warnings.filterwarnings('ignore')
-
-# ==========================================
-# 1. LIVE US-WIDE LIQUIDITY WATCHLIST DOWNLOADER
-# ==========================================
-def get_top_liquid_us_watchlist(target_count=1000):
-    print("Connecting to NASDAQ server to fetch US stock market universe...")
-    try:
-        ftp = ftplib.FTP('ftp.nasdaqtrader.com')
-        ftp.login('anonymous', '')
-        lines = []
-        ftp.retrlines('RETR SymbolDirectory/otherlisted.txt', lines.append)
+class OptionsAlphaBot:
+    def __init__(self, target_tickers):
+        self.tickers = target_tickers
         
-        nasdaq_lines = []
-        ftp.retrlines('RETR SymbolDirectory/nasdaqlisted.txt', nasdaq_lines.append)
-        ftp.quit()
+    def calculate_technical_cross(self, historical_df):
+        """
+        Calculates moving averages and checks for Golden or Death crosses.
+        historical_df requires columns: 'date', 'close'
+        """
+        historical_df['SMA50'] = historical_df['close'].rolling(window=50).mean()
+        historical_df['SMA200'] = historical_df['close'].rolling(window=200).mean()
         
-        all_tickers = []
-        for line in lines[1:-1]:
-            data = line.split('|')
-            if len(data) > 6 and data[4] == 'N' and data[6] == 'N':
-                symbol = data[0]
-                if len(symbol) <= 4 and symbol.isalpha(): all_tickers.append(symbol)
-                    
-        for line in nasdaq_lines[1:-1]:
-            data = line.split('|')
-            if len(data) > 3 and data[3] == 'N': 
-                symbol = data[0]
-                if len(symbol) <= 4 and symbol.isalpha(): all_tickers.append(symbol)
-                    
-        all_tickers = list(set(all_tickers))
-        print(f"Discovered {len(all_tickers)} total US listings. Initializing pattern-matching on top {target_count}...")
-        return all_tickers[:target_count]
-    except Exception as e:
-        print(f"Error accessing cross-market data: {e}. Falling back to default baseline universe.")
-        return ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'COST', 'JPM', 'XOM']
+        latest = historical_df.iloc[-1]
+        previous = historical_df.iloc[-2]
+        
+        # Check Cross Conditions
+        is_golden_cross = (previous['SMA50'] <= previous['SMA200']) and (latest['SMA50'] > latest['SMA200'])
+        is_death_cross = (previous['SMA50'] >= previous['SMA200']) and (latest['SMA50'] < latest['SMA200'])
+        
+        # Trend continuation state
+        current_trend = "BULLISH" if latest['SMA50'] > latest['SMA200'] else "BEARISH"
+        
+        return {
+            "is_golden": is_golden_cross,
+            "is_death": is_death_cross,
+            "current_trend": current_trend,
+            "sma50": latest['SMA50'],
+            "sma200": latest['SMA200']
+        }
 
-# ==========================================
-# 2. ADVANCED CHART PATTERN SCANNER
-# ==========================================
-def scan_chart_patterns(df):
-    if len(df) < 60:
-        return "No Pattern", 1.0
+    def filter_and_aggregate_uoa(self, flow_df):
+        """
+        Filters raw options flow to isolate direction and strip out hedges.
+        Filters used:
+        1. Multi-exchange sweep orders only (Aggressive institutional positioning)
+        2. Trade size must exceed current Open Interest (OI)
+        3. Transaction must hit Ask (Bullish Call / Bearish Put) or Bid (Bearish Call / Bullish Put)
+        4. Size must be institutional-grade (> $100k premium)
+        """
+        # 1. Isolate Sweeps with significant premium
+        filtered = flow_df[
+            (flow_df['trade_type'] == 'SWEEP') & 
+            (flow_df['premium'] >= 100000) & 
+            (flow_df['volume'] > flow_df['open_interest'])
+        ].copy()
+        
+        # 2. Determine net bias based on execution side (Ask vs Bid)
+        # Standard Hedging Filter: Exclude neutral mid-market or block crosses which are likely complex spreads.
+        filtered['net_bias'] = np.where(
+            ((filtered['option_type'] == 'CALL') & (filtered['side'] == 'ASK')) |
+            ((filtered['option_type'] == 'PUT') & (filtered['side'] == 'BID')), 
+            'BULLISH', 'BEARISH'
+        )
+        
+        # Strip trades occurring exactly at the MID price (often multi-leg hedges or spreads)
+        filtered = filtered[filtered['side'].isin(['ASK', 'BID'])]
+        
+        return filtered
 
-    close = df['close'].values
-    high = df['high'].values
-    low = df['low'].values
-    
-    prev_20_max = np.max(high[-21:-1])
-    prev_20_min = np.min(low[-21:-1])
-    current_close = close[-1]
-    
-    if current_close > prev_20_max: return "Channel Breakout", 1.3
-    elif current_close < prev_20_min: return "Channel Breakdown", 1.3
-
-    lookback = 45
-    window_lows = low[-lookback:]
-    window_highs = high[-lookback:]
-    
-    troughs = []
-    for i in range(5, len(window_lows) - 5):
-        if window_lows[i] == np.min(window_lows[i-5:i+6]): troughs.append(window_lows[i])
+    def score_trade(self, tech_setup, filtered_flow, current_price):
+        """
+        Evaluates the strength of alignment between UOA and Technical setups.
+        Scores from 0 to 100.
+        """
+        if filtered_flow.empty:
+            return None
             
-    peaks = []
-    for i in range(5, len(window_highs) - 5):
-        if window_highs[i] == np.max(window_highs[i-5:i+6]): peaks.append(window_highs[i])
-
-    if len(troughs) >= 2:
-        if abs(troughs[-1] - troughs[-2]) / troughs[-2] < 0.015:
-            if current_close > troughs[-1] * 1.01:
-                return "Double Bottom", 1.4
-
-    if len(peaks) >= 2:
-        if abs(peaks[-1] - peaks[-2]) / peaks[-2] < 0.015:
-            if current_close < peaks[-1] * 0.99:
-                return "Double Top", 1.4
-
-    return "Trend Continuation", 1.0
-
-# ==========================================
-# 3. MACRO & CONVICTION ENGINE 
-# ==========================================
-def calculate_conviction_score(ticker, df, weekly_df):
-    if len(df) < 200 or len(weekly_df) < 40: return None
-    
-    for d in [df, weekly_df]:
-        if isinstance(d.columns, pd.MultiIndex): d.columns = d.columns.get_level_values(0)
-        d.columns = [c.lower() for c in d.columns]
+        # Group to find the most dominant option contract being targeted
+        dominant_contract = filtered_flow.groupby(['strike', 'expiration', 'option_type', 'net_bias']).agg({
+            'premium': 'sum',
+            'volume': 'sum',
+            'open_interest': 'first'
+        }).reset_index().sort_values(by='premium', ascending=False).iloc[0]
         
-    current_price = df['close'].iloc[-1]
-    if current_price < 5.0: return None
-    
-    daily_sma = df['close'].rolling(200).mean().iloc[-1]
-    weekly_sma = weekly_df['close'].rolling(40).mean().iloc[-1]
-    
-    daily_bull = current_price > daily_sma
-    weekly_bull = weekly_df['close'].iloc[-1] > weekly_sma
-    daily_bear = current_price < daily_sma
-    weekly_bear = weekly_df['close'].iloc[-1] < weekly_sma
-    
-    if daily_bull and weekly_bull: trade_dir = 'CALL'
-    elif daily_bear and weekly_bear: trade_dir = 'PUT'
-    else: return None
+        score = 50 # Base score if UOA exists
         
-    pattern_name, pattern_multiplier = scan_chart_patterns(df)
-    
-    if trade_dir == 'CALL' and "Breakdown" in pattern_name: return None
-    if trade_dir == 'PUT' and "Breakout" in pattern_name: return None
-    if trade_dir == 'CALL' and "Top" in pattern_name: return None
-    if trade_dir == 'PUT' and "Bottom" in pattern_name: return None
-
-    return {
-        'ticker': ticker,
-        'type': trade_dir,
-        'chart_pattern': pattern_name,
-        'stock_entry': round(current_price, 2)
-    }
-
-# ==========================================
-# 4. UNUSUAL OPTIONS ACTIVITY ENGINE
-# ==========================================
-def detect_uoa(ticker, current_price, trade_dir):
-    try:
-        tkr = yf.Ticker(ticker)
-        dates = tkr.options
-        if not dates: return None
+        # Factor 1: Multiplier for volume over open interest
+        oi_multiplier = dominant_contract['volume'] / max(dominant_contract['open_interest'], 1)
+        if oi_multiplier > 3: score += 15
+        elif oi_multiplier > 1.5: score += 10
         
-        uoa_alerts = []
-        for date in dates[:3]:
-            chain = tkr.option_chain(date)
-            opts = chain.calls if trade_dir == 'CALL' else chain.puts
-            if opts.empty: continue
+        # Factor 2: Technical Cross Alignment
+        if tech_setup['is_golden'] and dominant_contract['net_bias'] == 'BULLISH':
+            score += 35 # High-conviction Golden Cross breakout
+        elif tech_setup['is_death'] and dominant_contract['net_bias'] == 'BEARISH':
+            score += 35 # High-conviction Death Cross breakdown
+        elif tech_setup['current_trend'] == dominant_contract['net_bias']:
+            score += 15 # Aligned with long term macro-trend
+        else:
+            score -= 30 # Disconnected from macro trend (Likely counter-trend trade or a hedge)
+
+        # Caps score at 100, floor at 0
+        score = max(0, min(100, score))
+        
+        # Only surface trades with a score threshold >= 70
+        if score < 70:
+            return None
             
-            opts['vol_to_oi'] = np.where(opts['openInterest'] > 0, opts['volume'] / opts['openInterest'], 0)
-            
-            if trade_dir == 'CALL':
-                opts = opts[(opts['strike'] >= current_price * 0.95) & (opts['strike'] <= current_price * 1.15)]
-            else:
-                opts = opts[(opts['strike'] <= current_price * 1.05) & (opts['strike'] >= current_price * 0.85)]
-                
-            uoa = opts[(opts['vol_to_oi'] >= 2.0) & (opts['volume'] >= 400)]
-            
-            if not uoa.empty:
-                best_uoa = uoa.sort_values(by='vol_to_oi', ascending=False).iloc[0]
-                uoa_alerts.append({
-                    'opt_expiry': date,
-                    'opt_strike': best_uoa['strike'],
-                    'vol_to_oi_ratio': round(best_uoa['vol_to_oi'], 1),
-                    'opt_volume': best_uoa['volume']
-                })
+        return {
+            "score": score,
+            "contract": dominant_contract,
+            "bias": dominant_contract['net_bias']
+        }
+
+    def generate_signal(self, ticker, historical_data, raw_flow_data, current_price):
+        """
+        Main runner function analyzing a ticker for actionable setups.
+        """
+        # Run pipelines
+        tech = self.calculate_technical_cross(historical_data)
+        clean_flow = self.filter_and_aggregate_uoa(raw_flow_data)
         
-        if not uoa_alerts: return None
-        best_alert = sorted(uoa_alerts, key=lambda x: x['vol_to_oi_ratio'], reverse=True)[0]
+        trade_evaluation = self.score_trade(tech, clean_flow, current_price)
         
-        return best_alert
-    except: return None
+        if not trade_evaluation:
+            return f"[{ticker}] No high-conviction trade set up found. Flow and Technicals lack alignment."
+            
+        contract = trade_evaluation['contract']
+        score = trade_evaluation['score']
+        
+        # Formulate Trade Execution Logic
+        # For long options, we build exit strategies relative to the underlying security's key technical levels
+        entry_trigger = current_price
+        
+        if trade_evaluation['bias'] == 'BULLISH':
+            # Take Profit: Target the next resistance or a 50% contract premium expansion
+            target_price = round(current_price * 1.06, 2) 
+            # Hard stop under the 50 SMA or a max 3% drop in underlying price
+            stop_loss = round(min(tech['sma50'], current_price * 0.97), 2)
+        else:
+            target_price = round(current_price * 0.94, 2)
+            stop_loss = round(max(tech['sma50'], current_price * 1.03), 2)
+
+        # Output Structured Order Ticket
+        output = f"""
+==================================================
+🚨 SIGNAL GENERATED: {ticker} (Score: {score}/100)
+==================================================
+• Setup Type: {'GOLDEN CROSS + CALL SWEEPS' if tech['is_golden'] else 'DEATH CROSS + PUT SWEEPS' if tech['is_death'] else 'TREND CONTINUATION + FLOW'}
+• Underlying Spot Price: ${current_price}
+
+• EXACT OPTION TO TAKE: 
+  {ticker} ${contract['strike']} {contract['option_type']} (Exp: {contract['expiration']})
+  [Context: Vol/OI Ratio: {round(contract['volume']/max(contract['open_interest'],1), 2)}x | Aggregate Contract Premium: ${contract['premium']:,}]
+
+• TRADE EXECUTION MATRIX (Based on Underlying Asset Price):
+  -> ENTRY POINT: Market Order at current spot (${entry_trigger})
+  -> EXIT (PROFIT TARGET): ${target_price} 
+  -> EXIT (STOP LOSS): ${stop_loss}
+==================================================
+"""
+        return output
 
 # ==========================================
-# 5. PIPELINE EXECUTOR & DUAL-SCORING COMPILER
+# SIMULATION / EXAMPLE USAGE
 # ==========================================
-def process_symbol(ticker):
-    try:
-        df = yf.download(ticker, period="1y", interval="1d", progress=False)
-        w_df = yf.download(ticker, period="2y", interval="1wk", progress=False)
-        
-        setup = calculate_conviction_score(ticker, df, w_df)
-        
-        if setup is not None:
-            uoa_data = detect_uoa(ticker, setup['stock_entry'], setup['type'])
-            if uoa_data:
-                setup.update(uoa_data)
-                
-                # ------------------------------------------
-                # ENGINE A: BALANCED (50/50) SCORING
-                # ------------------------------------------
-                conf_50 = 0
-                if "Double" in setup['chart_pattern']: conf_50 += 50
-                elif "Channel" in setup['chart_pattern']: conf_50 += 35
-                else: conf_50 += 20
-                
-                flow_score_50 = min(50, (setup['vol_to_oi_ratio'] * 5))
-                conf_50 += flow_score_50
-                setup['score_50_50'] = int(min(100, max(1, conf_50)))
-                
-                # ------------------------------------------
-                # ENGINE B: TECHNICAL-DOMINANT (70/30) W/ OVERRIDE
-                # ------------------------------------------
-                conf_70 = 0
-                if "Double" in setup['chart_pattern']: conf_70 += 70
-                elif "Channel" in setup['chart_pattern']: conf_70 += 45
-                else: conf_70 += 25
-                
-                flow_score_70 = min(30, (setup['vol_to_oi_ratio'] * 5))
-                conf_70 += flow_score_70
-                
-                # Check for the 10x Vol/OI Extreme Anomaly
-                if setup['vol_to_oi_ratio'] >= 10.0:
-                    conf_70 += 25
-                    setup['anomaly_flag'] = "⚠️ ANOMALY DETECTED"
-                else:
-                    setup['anomaly_flag'] = "-"
-                    
-                setup['score_70_30'] = int(min(100, max(1, conf_70)))
-                
-                return setup
-        return None
-    except: return None
-
 if __name__ == "__main__":
-    print("Initializing Dual-Scoring Engine (50/50 Balanced vs 70/30 Technical-Dominant)...")
+    # 1. Instantiate Bot
+    bot = OptionsAlphaBot(target_tickers=["NVDA"])
     
-    watchlist = get_top_liquid_us_watchlist(target_count=1000)
+    # 2. Mocking Technical Data (Simulating a Golden Cross event)
+    # 50 SMA crosses above 200 SMA on the last day
+    hist_data = pd.DataFrame({
+        'date': pd.date_range(start='2026-01-01', periods=5),
+        'close': [120, 122, 121, 125, 131]
+    })
+    # Forcing indicators to trigger a cross pattern internally
+    bot_tech_mock = {
+        'is_golden': True, 'is_death': False, 'current_trend': 'BULLISH', 'sma50': 124.5, 'sma200': 124.0
+    }
     
-    print(f"\nScanning {len(watchlist)} stocks for aligned setups...")
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        results = list(executor.map(process_symbol, watchlist))
+    # 3. Mocking Raw Institutional Options Flow
+    # Includes standard trades, mixed bids, and a massive sweep that exceeds Open Interest on the Ask side
+    raw_flow = pd.DataFrame([
+        {'trade_type': 'BLOCK', 'premium': 50000, 'volume': 100, 'open_interest': 5000, 'option_type': 'CALL', 'side': 'MID', 'strike': 135, 'expiration': '2026-07-17'},
+        {'trade_type': 'SWEEP', 'premium': 450000, 'volume': 8500, 'open_interest': 2000, 'option_type': 'CALL', 'side': 'ASK', 'strike': 135, 'expiration': '2026-07-17'},
+        {'trade_type': 'SWEEP', 'premium': 120000, 'volume': 300, 'open_interest': 4000, 'option_type': 'PUT', 'side': 'BID', 'strike': 120, 'expiration': '2026-06-26'}
+    ])
     
-    rankings = pd.DataFrame([r for r in results if r is not None])
+    # Override technical method to ingest our simulation parameters directly
+    bot.calculate_technical_cross = lambda x: bot_tech_mock
     
-    if not rankings.empty:
-        # Default sort by the 70/30 engine score
-        rankings = rankings.sort_values(by='score_70_30', ascending=False)
-        
-        pd.set_option('display.max_colwidth', 45)
-        
-        display_cols = [
-            'ticker', 'type', 'score_50_50', 'score_70_30', 'anomaly_flag', 
-            'chart_pattern', 'opt_strike', 'opt_expiry', 'vol_to_oi_ratio'
-        ]
-        
-        print("\n" + "="*135)
-        print(" CROSS-ENGINE CONFLUENCE COMPARISON TABLE ".center(135, "="))
-        print("="*135)
-        print(rankings[display_cols].to_string(index=False))
-        
-        rankings.to_csv('dual_scored_trades.csv', index=False)
-        print("\n>> Full dataset exported to 'dual_scored_trades.csv'")
-    else:
-        print("No tickers established confluence between patterns and options flow today.")
+    # 4. Generate Signal
+    trade_ticket = bot.generate_signal(
+        ticker="NVDA", 
+        historical_data=hist_data, 
+        raw_flow_data=raw_flow, 
+        current_price=131.00
+    )
+    
+    print(trade_ticket)
