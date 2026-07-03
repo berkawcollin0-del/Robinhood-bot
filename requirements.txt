@@ -1,4 +1,1 @@
-pandas
-yfinance
-lxml
-numpy
+requests>=2.31.0
