@@ -16,23 +16,46 @@ AIRPORTS = {
 }
 
 def robust_get_request(url, params, retries=3, backoff_factor=2):
-    """
-    Executes a GET request with an explicit timeout and exponential backoff
-    to handle public API rate limits or transient network drops.
-    """
     for i in range(retries):
         try:
-            # Added explicit timeout=15 seconds
             response = requests.get(url, params=params, timeout=15)
             if response.status_code == 200:
                 return response.json()
-            elif response.status_code == 429: # Rate limited
+            elif response.status_code == 429:
                 time.sleep(backoff_factor ** i)
         except (requests.exceptions.RequestException, Exception):
             if i == retries - 1:
                 raise
             time.sleep(backoff_factor ** i)
     raise requests.exceptions.ReadTimeout("Max retries exceeded.")
+
+def get_realtime_observations_today(lat, lon, target_date):
+    """
+    Pulls the actual recorded hourly temperatures for today up to the current hour
+    to prevent the bot from guessing on things that have already happened.
+    """
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat, "longitude": lon,
+        "hourly": "temperature_2m", "temperature_unit": "fahrenheit",
+        "timezone": "auto", "forecast_days": 1
+    }
+    try:
+        res = robust_get_request(url, params)
+        hourly = res.get("hourly", {})
+        times = pd.to_datetime(hourly.get("time", []))
+        temps = hourly.get("temperature_2m", [])
+        
+        df = pd.DataFrame({"temp": temps}, index=times)
+        # Filter for hours that have already occurred today in the local timezone
+        now_local = datetime.datetime.now()
+        observed_today = df[(df.index.date == pd.to_datetime(target_date).date()) & (df.index <= now_local)]
+        
+        if not observed_today.empty:
+            return observed_today["temp"].max(), observed_today["temp"].min()
+    except Exception:
+        pass
+    return -999.0, 999.0 # Fallbacks if station data has a brief reporting lag
 
 def backtest_airport_accuracy(start_date, end_date):
     metrics = {}
@@ -72,20 +95,19 @@ def backtest_airport_accuracy(start_date, end_date):
                 "mae_min": mae_min, "bias_min": bias_min,
                 "overall_score": (mae_max + mae_min) / 2
             }
-            # Tiny cool-down breathing room between airport hits
-            time.sleep(0.5)
+            time.sleep(0.2)
         except Exception as e:
             print(f"⚠️ Error processing backtest for {code}: {e}")
             
     return pd.DataFrame.from_dict(metrics, orient='index')
 
-def get_live_ensemble_odds(city_code, target_date, threshold, is_high_market=True, bias_adjustment=0.0):
+def get_live_ensemble_odds(city_code, target_date, threshold, is_high_market=True, bias_adjustment=0.0, obs_max=-999.0, obs_min=999.0):
     loc = AIRPORTS[city_code]
     url = "https://ensemble-api.open-meteo.com/v1/ensemble"
     params = {
         "latitude": loc["lat"], "longitude": loc["lon"],
         "hourly": "temperature_2m", "models": "gfs_seamless",
-        "temperature_unit": "fahrenheit", "timezone": "auto", "forecast_days": 10
+        "temperature_unit": "fahrenheit", "timezone": "auto", "forecast_days": 2
     }
     
     res = robust_get_request(url, params)
@@ -98,9 +120,16 @@ def get_live_ensemble_odds(city_code, target_date, threshold, is_high_market=Tru
         series = pd.Series(hourly[member], index=times)
         day_series = series[series.index.date == pd.to_datetime(target_date).date()]
         if not day_series.empty:
-            corrected_series = day_series - bias_adjustment
-            extreme_val = corrected_series.max() if is_high_market else corrected_series.min()
-            daily_extremes.append(extreme_val)
+            # Apply our historical model correction bias to the forecast slice
+            corrected_forecast = day_series - bias_adjustment
+            
+            if is_high_market:
+                # Intraday Blend: True daily high is the max of what ALREADY happened vs what is FORECAST to happen
+                final_member_est = max(obs_max, corrected_forecast.max())
+            else:
+                final_member_est = min(obs_min, corrected_forecast.min())
+                
+            daily_extremes.append(final_member_est)
             
     if not daily_extremes:
         return None
@@ -110,48 +139,68 @@ def get_live_ensemble_odds(city_code, target_date, threshold, is_high_market=Tru
     return {"odds": odds, "model_mean": mu, "model_std": sigma}
 
 if __name__ == "__main__":
-    today = datetime.date(2026, 7, 4)
-    backtest_start = (today - datetime.timedelta(days=40)).strftime("%Y-%m-%d")
-    backtest_end = (today - datetime.timedelta(days=5)).strftime("%Y-%m-%d")
+    # AUTOMATICALLY TARGET TODAY
+    today = datetime.date.today()
+    target_today = today.strftime("%Y-%m-%d")
+    
+    # Slidback window dynamically updates relative to today
+    backtest_start = (today - datetime.timedelta(days=35)).strftime("%Y-%m-%d")
+    backtest_end = (today - datetime.timedelta(days=2)).strftime("%Y-%m-%d")
     
     accuracy_df = backtest_airport_accuracy(backtest_start, backtest_end)
-    
-    # Check if we got any valid backtest results back before attempting sorting
     if accuracy_df.empty:
         print("❌ Error: No backtest data gathered. Aborting run.")
         exit(1)
         
     ranked_cities = accuracy_df.sort_values(by="overall_score")
     
-    print("\n" + "="*65)
-    print("🏆 AIRPORT FORECAST ACCURACY RANKINGS (LEAST ERROR TO MOST ERROR)")
-    print("="*65)
-    print(ranked_cities[["mae_max", "bias_max", "mae_min", "bias_min", "overall_score"]].to_string())
-    
-    target_tomorrow = (today + datetime.timedelta(days=2)).strftime("%Y-%m-%d")
-    high_threshold = 90.0
-    low_threshold = 65.0
-    
-    print("\n" + "="*65)
-    print(f"📊 LIVE PROBABILITY ODDS FOR TARGET DATE: {target_tomorrow}")
-    print("="*65)
+    print("\n" + "="*75)
+    print(f"📊 LIVE INTRADAY TRADING ODDS FOR TODAY ONLY: {target_today}")
+    print("="*75)
+    print("Pulling live station observations and parsing the newest midday ensemble tracks...")
     
     for code in ranked_cities.index:
-        # Wrap the live loops inside a try/except so one failing network request won't crash the whole bot
         try:
             bias_h = accuracy_df.loc[code, "bias_max"]
             bias_l = accuracy_df.loc[code, "bias_min"]
             
-            high_market = get_live_ensemble_odds(code, target_tomorrow, high_threshold, is_high_market=True, bias_adjustment=bias_h)
-            time.sleep(0.5) # Give the API a brief moment to breathe
-            low_market = get_live_ensemble_odds(code, target_tomorrow, low_threshold, is_high_market=False, bias_adjustment=bias_l)
-            time.sleep(0.5)
+            # Fetch live ground-truth readings recorded so far today
+            obs_max, obs_min = get_realtime_observations_today(AIRPORTS[code]["lat"], AIRPORTS[code]["lon"], target_today)
             
-            print(f"\n✈️ {code} ({AIRPORTS[code]['name']}):")
-            if high_market:
-                print(f"  ▪️ High Market (≥ {high_threshold}°F): {high_market['odds']*100:6.1f}% Odds | Fair Price: {int(round(high_market['odds']*100))}¢ (Exp Max: {high_market['model_mean']:.1f}°F)")
-            if low_market:
-                print(f"  ▪️ Low Market  (≤ {low_threshold}°F): {low_market['odds']*100:6.1f}% Odds | Fair Price: {int(round(low_market['odds']*100))}¢ (Exp Min: {low_market['model_mean']:.1f}°F)")
-        
+            # Baseline pull to construct the active ladder
+            base_high = get_live_ensemble_odds(code, target_today, threshold=70.0, is_high_market=True, bias_adjustment=bias_h, obs_max=obs_max, obs_min=obs_min)
+            time.sleep(0.2)
+            base_low = get_live_ensemble_odds(code, target_today, threshold=70.0, is_high_market=False, bias_adjustment=bias_l, obs_max=obs_max, obs_min=obs_min)
+            time.sleep(0.2)
+            
+            print("\n" + "-"*75)
+            print(f"✈️ {code} ({AIRPORTS[code]['name']})")
+            if obs_max > -90.0:
+                print(f"   Station Recorded Real-Time Bounds So Far Today: High {obs_max:.1f}°F | Low {obs_min:.1f}°F")
+            
+            # --- HIGH TEMPERATURE LADDER ---
+            if base_high:
+                expected_max = base_high['model_mean']
+                center_t = int(round(expected_max))
+                ladder_highs = [center_t - 2, center_t - 1, center_t, center_t + 1, center_t + 2]
+                
+                print(f"\n   ☀️ TODAY'S ACTIVE HIGH CONTRACTS (Blended Expected Max: {expected_max:.1f}°F):")
+                for t in ladder_highs:
+                    m_data = get_live_ensemble_odds(code, target_today, threshold=float(t), is_high_market=True, bias_adjustment=bias_h, obs_max=obs_max, obs_min=obs_min)
+                    prob = m_data['odds'] * 100
+                    print(f"     ▪️ Will High hit ≥ {t}°F? -> {prob:5.1f}% Odds | Fair Value: {int(round(prob))}¢")
+            
+            # --- LOW TEMPERATURE LADDER ---
+            if base_low:
+                expected_min = base_low['model_mean']
+                center_t = int(round(expected_min))
+                ladder_lows = [center_t - 2, center_t - 1, center_t, center_t + 1, center_t + 2]
+                
+                print(f"\n   🌙 TODAY'S ACTIVE LOW CONTRACTS (Blended Expected Min: {expected_min:.1f}°F):")
+                for t in ladder_lows:
+                    m_data = get_live_ensemble_odds(code, target_today, threshold=float(t), is_high_market=False, bias_adjustment=bias_l, obs_max=obs_max, obs_min=obs_min)
+                    prob = m_data['odds'] * 100
+                    print(f"     ▪️ Will Low hit ≤ {t}°F?  -> {prob:5.1f}% Odds | Fair Value: {int(round(prob))}¢")
+                    
         except Exception as e:
             print(f"\n✈️ {code}: ⚠️ Skipped live evaluation due to error: {e}")
