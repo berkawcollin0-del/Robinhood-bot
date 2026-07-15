@@ -25,4 +25,4 @@ jobs:
         run: python main.py
         env:
           # Use secrets for security!
-          TELEGRAM_TOKEN: 
+          TELEGRAM_TOKEN: 8558552493:AAHDCklNVlS-ElKy9KgEs-1y3okRHkWG9Ms
