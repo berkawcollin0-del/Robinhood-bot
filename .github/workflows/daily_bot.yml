@@ -1,26 +1,28 @@
-name: Trading Bot Daily Run
+name: Housing News Bot
+
 on:
   schedule:
-    # This runs at 20:50 UTC (adjust for market close time)
-    - cron: '50 20 * * 1-5'
-  workflow_dispatch: # Allows you to run it manually via the GitHub UI
+    # 0 minutes, 14 hours (9:00 AM CDT), every day
+    - cron: '0 14 * * *'
+  workflow_dispatch: # Allows manual triggering for testing
 
 jobs:
-  build:
+  run-bot:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install feedparser python-telegram-bot
 
-      - name: Run Bot
-        env:
-          RH_AGENTIC_API_KEY: ${{ secrets.RH_AGENTIC_API_KEY }}
+      - name: Run bot
         run: python main.py
+        env:
+          # Use secrets for security!
+          TELEGRAM_TOKEN: 
