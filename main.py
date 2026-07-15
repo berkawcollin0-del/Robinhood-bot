@@ -60,7 +60,7 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 if __name__ == '__main__':
     # Insert your specific BotFather token here
-    TOKEN = '8558552493:AAHDCklNVlS-ElKy9KgEs-1y3okRHkWG9Ms'
+    TOKEN = 'AAHDCklNVlS-ElKy9KgEs-1y3okRHkWG9Ms'
     
     # Build the application
     app = Application.builder().token(TOKEN).build()
