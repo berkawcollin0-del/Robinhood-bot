@@ -1,127 +1,74 @@
-import numpy as np
-import pandas as pd
-from sklearn.decomposition import PCA
-from sklearn.linear_model import LinearRegression
+import feedparser
+import re
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-class StatArbEngine:
-    def __init__(self, n_factors=5, window_size=60):
-        self.n_factors = n_factors
-        self.window_size = window_size
-        
-    def extract_residuals(self, returns_df):
-        """
-        Step 1 & 2: Use PCA to find macro factors, then regress them out 
-        to isolate the idiosyncratic residuals for each stock.
-        """
-        # Fit PCA on the returns matrix to find dominant latent factors
-        pca = PCA(n_components=self.n_factors)
-        factors = pca.fit_transform(returns_df)
-        
-        residuals = pd.DataFrame(index=returns_df.index, columns=returns_df.columns)
-        
-        # Regress each stock against the common factors
-        for stock in returns_df.columns:
-            y = returns_df[stock].values
-            reg = LinearRegression().fit(factors, y)
-            # Residual = Actual Return - Systematic Return
-            residuals[stock] = y - reg.predict(factors)
-            
-        return residuals
+# Define the RSS feeds using Google News for reliable aggregation
+US_FEED_URL = "https://news.google.com/rss/search?q=US+housing+real+estate+market+news&hl=en-US&gl=US&ceid=US:en"
+MO_FEED_URL = "https://news.google.com/rss/search?q=Missouri+housing+real+estate+market+news&hl=en-US&gl=US&ceid=US:en"
 
-    def fit_ou_process(self, cumulative_residuals):
-        """
-        Step 3 & 4: Fit an AR(1) process to model the Ornstein-Uhlenbeck parameters
-        and calculate the standardized S-Score.
-        """
-        # Discretized OU: X_t = a + b * X_{t-1} + error
-        x_lag = cumulative_residuals.shift(1).dropna().values.reshape(-1, 1)
-        x_curr = cumulative_residuals.loc[cumulative_residuals.index[1:]].values
-        
-        reg = LinearRegression().fit(x_lag, x_curr)
-        a = reg.intercept_
-        b = reg.coef_[0]
-        
-        # A valid mean-reverting spring requires 0 < b < 1
-        if b <= 0 or b >= 1:
-            return {"half_life": np.nan, "s_score": np.nan}
-        
-        # Calculate OU continuous-time parameters (assuming dt = 1 day)
-        kappa = -np.log(b)
-        theta = a / (1 - b)
-        
-        # Calculate residuals of the AR(1) fit to find variance
-        fit_residuals = x_curr - reg.predict(x_lag)
-        sigma_zeta = np.std(fit_residuals)
-        
-        # Equilibrium variance of the OU process
-        sigma_eq = np.sqrt(sigma_zeta**2 / (1 - b**2))
-        
-        # Calculate half-life of mean reversion (in days)
-        half_life = np.log(2) / kappa
-        
-        # S-Score = current distance from fair value normalized by equilibrium volatility
-        current_x = cumulative_residuals.iloc[-1]
-        s_score = (current_x - theta) / sigma_eq
-        
-        return {"half_life": half_life, "s_score": s_score}
+def clean_html(raw_html):
+    """Removes HTML tags from the summary text to keep the output clean."""
+    cleanr = re.compile('<.*?>')
+    cleantext = re.sub(cleanr, '', raw_html)
+    # Remove "Read full article" type text often appended by Google News
+    cleantext = cleantext.split('nbsp;')[0] 
+    return cleantext.strip()
 
-    def generate_signals(self, returns_df):
-        """
-        Executes the pipeline over the specified lookback window.
-        """
-        # Keep only the window required for analysis
-        window_returns = returns_df.tail(self.window_size)
-        residuals = self.extract_residuals(window_returns)
-        
-        # Convert daily residual returns into a cumulative price-like track
-        cumulative_residuals = residuals.cumsum()
-        
-        results = {}
-        for stock in returns_df.columns:
-            ou_params = self.fit_ou_process(cumulative_residuals[stock])
-            results[stock] = ou_params
-            
-        # Format into an actionable dashboard
-        df_signals = pd.DataFrame(results).T
-        df_signals['Signal'] = 'HOLD / NO SIGNAL'
-        df_signals.loc[df_signals['s_score'] > 1.25, 'Signal'] = 'SHORT (Overvalued)'
-        df_signals.loc[df_signals['s_score'] < -1.25, 'Signal'] = 'LONG (Undervalued)'
-        df_signals.loc[(df_signals['s_score'].abs() < 0.2), 'Signal'] = 'CLOSE POSITION'
-        
-        return df_signals
-
-# =====================================================================
-# SIMULATION & VERIFICATION
-# =====================================================================
-if __name__ == "__main__":
-    np.random.seed(42)
-    days, n_stocks = 100, 10
-    tickers = [f"STK_{i}" for i in range(n_stocks)]
+def fetch_news(feed_url, limit=5):
+    """Fetches and formats news from the given RSS feed into bullet points."""
+    feed = feedparser.parse(feed_url)
+    bullet_points = []
     
-    # Generate mock systemic market factors
-    market_factor = np.random.normal(0.0005, 0.01, days)
-    sector_factor = np.random.normal(0.0002, 0.01, days)
-    
-    mock_returns = {}
-    for ticker in tickers:
-        beta_m = np.random.uniform(0.5, 1.5)
-        beta_s = np.random.uniform(-0.5, 1.0)
+    for entry in feed.entries[:limit]:
+        title = entry.title
+        link = entry.link
         
-        # Inject an artificially mean-reverting idiosyncratic shock into STK_0
-        if ticker == "STK_0":
-            # Highly stretched negative residual (simulating a severe overreaction)
-            idiosyncratic = np.random.normal(0, 0.005, days)
-            idiosyncratic[-1] = -0.08  
-        else:
-            idiosyncratic = np.random.normal(0, 0.01, days)
-            
-        mock_returns[ticker] = beta_m * market_factor + beta_s * sector_factor + idiosyncratic
+        # Clean the summary to get a brief description for the bullet point
+        summary = ""
+        if 'summary' in entry:
+            summary = clean_html(entry.summary)
+            # Truncate summary if it's too long
+            if len(summary) > 150:
+                summary = summary[:147] + "..."
+        
+        # Format as a Markdown bullet point
+        bullet_points.append(f"• *[{title}]({link})*\n  {summary}")
+        
+    return "\n\n".join(bullet_points)
 
-    df_market_data = pd.DataFrame(mock_returns, index=pd.date_range(end='2026-07-06', periods=days))
+async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /news command by fetching and sending the separated news."""
+    await update.message.reply_text("Fetching the latest housing news for you. Please wait a moment...")
     
-    # Run Engine
-    engine = StatArbEngine(n_factors=2, window_size=60)
-    signal_dashboard = engine.generate_signals(df_market_data)
+    # Fetch the top 5 news articles for each region
+    us_news = fetch_news(US_FEED_URL, limit=5)
+    mo_news = fetch_news(MO_FEED_URL, limit=5)
     
-    print("\n=== QUANT STAT-ARB TRADING DASHBOARD ===")
-    print(signal_dashboard.to_string())
+    # Construct the final message with clear information hierarchy 
+    message = (
+        "🇺🇸 **US HOUSING NEWS**\n"
+        "---\n"
+        f"{us_news}\n\n"
+        "🐻 **MISSOURI HOUSING NEWS**\n"
+        "---\n"
+        f"{mo_news}"
+    )
+    
+    # Send the message, parsing Markdown formatting and disabling giant link previews
+    await update.message.reply_text(message, parse_mode='Markdown', disable_web_page_preview=True)
+
+if __name__ == '__main__':
+    # Insert your specific BotFather token here
+    TOKEN = '8558552493:AAHDCklNVlS-ElKy9KgEs-1y3okRHkWG9Ms'
+    
+    # Build the application
+    app = Application.builder().token(TOKEN).build()
+    
+    # Add the /news command handler to listen for user input
+    app.add_handler(CommandHandler('news', news_command))
+    
+    print("Bot is running! Send /news to your bot in Telegram to get the latest updates.")
+    
+    # Run the bot until you press Ctrl-C
+    app.run_polling()
