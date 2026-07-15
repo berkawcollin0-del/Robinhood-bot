@@ -1,10 +1,9 @@
-name: Housing News Bot
+name: Daily Agent Bot
 
 on:
   schedule:
-    # 0 minutes, 14 hours (9:00 AM CDT), every day
     - cron: '0 14 * * *'
-  workflow_dispatch: # Allows manual triggering for testing
+  workflow_dispatch:
 
 jobs:
   run-bot:
@@ -19,10 +18,10 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install feedparser python-telegram-bot
+        run: pip install -r requirements.txt
 
-      - name: Run bot
+      - name: Run Bot
         run: python main.py
         env:
-          # Use secrets for security!
-          TELEGRAM_TOKEN: 8558552493:AAHDCklNVlS-ElKy9KgEs-1y3okRHkWG9Ms
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
