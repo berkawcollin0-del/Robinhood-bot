@@ -84,7 +84,8 @@ def run_multi_backtest(ticker):
     bh_final = bh_shares * end_price
     bh_profit = bh_final - initial_cash
 
-    print(f"🏆 BENCHMARK -> Buy & Hold Final Value: ${bh_final:,.2f} ({ bh_profit:+\n,.2f} Profit)")
+    # FIXED: The line break in the format specifier has been removed
+    print(f"🏆 BENCHMARK -> Buy & Hold Final Value: ${bh_final:,.2f} ({bh_profit:+,.2f} Profit)")
     print("-" * 75)
     print(f"{'ID':<3} | {'Strategy Setup Name':<30} | {'Final Value':<14} | {'Net P/L':<12}")
     print("-" * 75)
@@ -125,25 +126,7 @@ def run_multi_backtest(ticker):
         print(f"#{idx:<2} | {strat['name']:<30} | ${final_cash:<13,.2f} | {profit_str:<12} {beat_marker}")
 
 if __name__ == '__main__':
-    tickers = [
-    'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'BRK-B', 'TSLA', 'AVGO', 'JPM',
-    'V', 'UNH', 'JNJ', 'PG', 'MA', 'HD', 'CVX', 'MRK', 'ABBV', 'KO', 'PEP', 'XOM',
-    'ADBE', 'COST', 'WMT', 'BAC', 'CRM', 'AMD', 'NFLX', 'CSCO', 'TMO', 'DHR', 'INTC',
-    'CMCSA', 'DIS', 'ABT', 'PFE', 'VZ', 'WFC', 'ORCL', 'LIN', 'UPS', 'INTU', 'MCD',
-    'QCOM', 'CAT', 'GE', 'BA', 'RTX', 'TXN', 'AMGN', 'HON', 'GS', 'IBM', 'PLD',
-    'AMAT', 'UNP', 'LOW', 'DE', 'NEE', 'AXP', 'ISRG', 'BKNG', 'SPGI', 'BLK', 'MDLZ',
-    'SYK', 'GILD', 'ADP', 'CB', 'MMC', 'LRCX', 'ADI', 'CI', 'BDX', 'REGN', 'C', 'EL',
-    'MU', 'CSX', 'FISV', 'SNPS', 'KLAC', 'PNC', 'ZTS', 'ITW', 'EOG', 'MCK', 'AON',
-    'SHW', 'PH', 'CNC', 'WM', 'MS', 'USB', 'ETN', 'FDX', 'APD', 'NSC', 'CDNS', 'MMM',
-    'CL', 'GD', 'SNY', 'TGT', 'SO', 'BSX', 'PGR', 'CME', 'DUK', 'CBRE', 'PYPL', 'ADSK',
-    'MDT', 'MRVL', 'TEAM', 'KHC', 'DXCM', 'BIIB', 'CTAS', 'IT', 'HCA', 'HUM', 'IDXX',
-    'ECL', 'FTNT', 'ROK', 'AFL', 'WEC', 'FCX', 'O', 'PAYX', 'D', 'NXPI', 'CPT', 'VRSK',
-    'AJG', 'CTSH', 'MNST', 'EXC', 'YUM', 'MTD', 'CARR', 'PPL', 'PHM', 'AMP', 'FAST',
-    'TEL', 'ANSS', 'MSI', 'PPG', 'KMB', 'GLW', 'WBA', 'GWW', 'SWK', 'WST', 'DHI',
-    'JCI', 'BKR', 'LEN', 'HLT', 'CMI', 'ZBH', 'NVR', 'TDG', 'ED', 'PCAR', 'TSN',
-    'STZ', 'IFF', 'MCHP', 'PSX', 'ROST', 'FITB', 'AEE', 'RMD', 'VMC', 'XYL', 'HPQ',
-    'SRE', 'FE', 'AEP', 'CINF', 'NTRS', 'EXPD', 'KEYS', 'MTB', 'DFS', 'HIG', 'HBAN',
-    'KEY', 'CF', 'WRB', 'DOV', 'CHD', 'SJM', 'TT', 'SYY', 'QRVO', 'KMI', 'DAL',
-    'LUV', 'UAL', 'KSU', 'WDC', 'STT', 'BBY', 'JBHT', 'LEG', 'POOL', 'TER', 'DXC']
+    # You can change or add any tickers you want to test here
+    tickers = ['NVDA', 'GOOG', 'AAPL']
     for t in tickers:
         run_multi_backtest(t)
