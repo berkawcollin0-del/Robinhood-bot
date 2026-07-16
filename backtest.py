@@ -7,7 +7,7 @@ import backtrader as bt
 import yfinance as yf
 
 class SmaCross(bt.Strategy):
-    # Strategy parameters: 10-day vs 30-day moving average
+    # Default parameters (These are overridden dynamically in the loop below)
     params = dict(
         fast_period=10,
         slow_period=30
@@ -25,15 +25,12 @@ class SmaCross(bt.Strategy):
         elif self.crossover < 0:    # Sell signal
             self.close()
 
-def run_backtest(ticker):
-    print(f"\n{'='*40}")
-    print(f"🚀 BACKTESTING: {ticker}")
-    print(f"{'='*40}")
+def run_multi_backtest(ticker):
+    print(f"\n{'='*65}")
+    print(f"🚀 STOCK: {ticker}")
+    print(f"{'='*65}")
     
-    cerebro = bt.Cerebro()
-    cerebro.addstrategy(SmaCross)
-
-    # Use Ticker().history() to fetch clean data
+    # 1. Fetch data ONCE per stock to avoid rate limits from Yahoo Finance
     stock = yf.Ticker(ticker)
     df = stock.history(start='2022-01-01', end='2024-01-01')
     
@@ -44,30 +41,54 @@ def run_backtest(ticker):
     # Remove timezone data to prevent Backtrader errors
     df.index = df.index.tz_localize(None)
 
-    # Pass the pandas dataframe into Backtrader
-    data = bt.feeds.PandasData(dataname=df)
-    cerebro.adddata(data)
+    # 2. Define 10 Different Strategy Combinations (Fast SMA, Slow SMA)
+    strategies = [
+        (5, 20),   # 1. Very Fast
+        (10, 30),  # 2. Standard Short-term
+        (10, 50),  # 3. Short-to-Medium
+        (15, 50),  # 4. Slightly slower short-to-medium
+        (20, 50),  # 5. Medium-term
+        (20, 100), # 6. Medium-to-Long
+        (30, 100), # 7. Slower Medium-to-Long
+        (50, 100), # 8. Standard Long-term
+        (50, 200), # 9. The "Golden Cross" (Classic)
+        (100, 200) # 10. Very Slow, Long-term
+    ]
 
-    # Start with a $10,000 hypothetical portfolio
     initial_cash = 10000.0
-    cerebro.broker.setcash(initial_cash)
-    
-    # 0.1% fee per trade to make the simulation realistic
-    cerebro.broker.setcommission(commission=0.001) 
+    print(f"Starting Portfolio Value: ${initial_cash:,.2f}\n")
+    print(f"{'Strat':<7} | {'Fast':<4} | {'Slow':<4} | {'Final Value':<13} | {'Net P/L':<10}")
+    print("-" * 65)
 
-    print(f'Starting Portfolio Value: ${initial_cash:,.2f}')
-    
-    # Run the simulation
-    cerebro.run()
-    
-    final_cash = cerebro.broker.getvalue()
-    profit = final_cash - initial_cash
-    
-    print(f'Final Portfolio Value:  ${final_cash:,.2f}')
-    print(f'Total Profit / Loss:    ${profit:,.2f}\n')
+    # 3. Loop through all 10 combinations
+    for i, (fast, slow) in enumerate(strategies, 1):
+        cerebro = bt.Cerebro()
+        
+        # Inject the custom parameters into the strategy
+        cerebro.addstrategy(SmaCross, fast_period=fast, slow_period=slow)
+
+        # Feed the downloaded data into Backtrader
+        data = bt.feeds.PandasData(dataname=df)
+        cerebro.adddata(data)
+
+        # Set up broker conditions
+        cerebro.broker.setcash(initial_cash)
+        cerebro.broker.setcommission(commission=0.001) 
+        
+        # Run the backtest
+        cerebro.run()
+        
+        # Calculate results
+        final_cash = cerebro.broker.getvalue()
+        profit = final_cash - initial_cash
+        
+        # Format profit string to show + or - clearly
+        profit_str = f"+${profit:,.2f}" if profit >= 0 else f"-${abs(profit):,.2f}"
+        
+        # Print the row for this specific strategy
+        print(f"#{i:<5} | {fast:<4} | {slow:<4} | ${final_cash:<12,.2f} | {profit_str}")
 
 if __name__ == '__main__':
-    # Backtest NVDA and GOOG sequentially
     tickers = ['NVDA', 'GOOG']
     for t in tickers:
-        run_backtest(t)
+        run_multi_backtest(t)
