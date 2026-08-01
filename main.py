@@ -1,59 +1,94 @@
-import feedparser
-import random
-import datetime
-import os
-import asyncio
-from telegram import Bot
+# main.py
+"""
+Daily opportunity scanner & ranked list
+"""
 
-# Configuration
-TOKEN = os.environ.get('8558552493:AAHDCklNVlS-ElKy9KgEs-1y3okRHkWG9Ms')
-CHAT_ID = os.environ.get('8513717392')
+from signals import analyze_ticker
+from options import score_options_attractiveness
+from risk import calculate_position_size
+from tabulate import tabulate
+import config
 
-FEEDS = {
-    "🇺🇸 US Housing": "https://news.google.com/rss/search?q=US+housing+real+estate+market+news&hl=en-US&gl=US&ceid=US:en",
-    "🐻 St. Louis Updates": "https://news.google.com/rss/search?q=St.+Louis+business+real+estate+development&hl=en-US&gl=US&ceid=US:en",
-    "⚖️ Law & Policy": "https://news.google.com/rss/search?q=real+estate+law+policy+changes+NAR&hl=en-US&gl=US&ceid=US:en",
-    "🤖 AI in Real Estate": "https://news.google.com/rss/search?q=AI+in+real+estate+tools+trends&hl=en-US&gl=US&ceid=US:en"
-}
-
-DAILY_TIPS = [
-    "Call 5 past clients today just to ask how they are doing—no sales pitch.",
-    "Draft one social media post highlighting a local St. Louis business you love.",
-    "Spend 15 minutes researching a new AI tool to automate your listing descriptions.",
-    "Review your local MLS for 'Coming Soon' listings.",
-    "Update your CRM with notes from your last 3 client interactions.",
-    "Write a handwritten note to someone in your professional network.",
-    "Identify one local event in Wentzville/St. Louis and plan to attend for networking."
+# Starter universe – you can expand this later
+WATCHLIST = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD",
+    "JPM", "V", "MA", "UNH", "XOM", "CVX", "LLY", "AVGO",
+    "COST", "NFLX", "CRM", "ADBE", "PEP", "KO", "WMT", "DIS"
 ]
 
-def get_daily_tip():
-    return DAILY_TIPS[datetime.datetime.now().timetuple().tm_yday % len(DAILY_TIPS)]
+def run_scan():
+    print("Scanning for swing options opportunities...\n")
+    all_opportunities = []
 
-def fetch_feed(url, limit=3):
-    feed = feedparser.parse(url)
-    items = []
-    for entry in feed.entries[:limit]:
-        # Using simple formatting to avoid length errors
-        items.append(f"• {entry.title}\n  {entry.link}")
-    return "\n\n".join(items) if items else "No updates found today."
+    for ticker in WATCHLIST:
+        print(f"Analyzing {ticker}...")
+        results = analyze_ticker(ticker)
+        if not results:
+            continue
 
-async def main():
-    bot = Bot(token=TOKEN)
-    
-    # 1. Send Tip
-    intro = f"📅 **Agent Briefing - {datetime.date.today().strftime('%B %d, %Y')}**\n\n💡 **TIP:** {get_daily_tip()}"
-    await bot.send_message(chat_id=CHAT_ID, text=intro, parse_mode='Markdown')
-    
-    # 2. Send Categories one by one to avoid message length limits
-    for category, url in FEEDS.items():
-        content = fetch_feed(url)
-        message = f"**{category}**\n\n{content}"
-        await bot.send_message(
-            chat_id=CHAT_ID, 
-            text=message, 
-            parse_mode='Markdown', 
-            disable_web_page_preview=True
-        )
+        for res in results:
+            # Add options attractiveness
+            opt_score, opt_details = score_options_attractiveness(
+                ticker, res["direction"], res["price"]
+            )
+            res["options_score"] = round(opt_score, 1)
+            res["options_details"] = opt_details
 
-if __name__ == '__main__':
-    asyncio.run(main())
+            # Recalculate final score with real options score
+            res["score"] = round(
+                res["fund_score"] * config.WEIGHT_FUNDAMENTAL / 0.30 * 0.30 +
+                res["trend_score"] * config.WEIGHT_TREND / 0.20 * 0.20 +
+                res["setup_score"] * config.WEIGHT_SETUP / 0.25 * 0.25 +
+                opt_score * config.WEIGHT_OPTIONS +
+                7 * config.WEIGHT_RR,   # temporary RR
+                1
+            )
+
+            # Position sizing (rough estimate using last price of option)
+            est_option_price = opt_details.get("last") or opt_details.get("ask") or 2.50
+            sizing = calculate_position_size(est_option_price)
+            res["sizing"] = sizing
+
+            all_opportunities.append(res)
+
+    # Sort by score descending
+    all_opportunities.sort(key=lambda x: x["score"], reverse=True)
+
+    # Filter and display
+    print("\n" + "="*80)
+    print("RANKED OPPORTUNITIES")
+    print("="*80)
+
+    table_data = []
+    for i, opp in enumerate(all_opportunities, 1):
+        if opp["score"] < config.MIN_SCORE_TO_TRADE:
+            continue
+
+        table_data.append([
+            i,
+            opp["ticker"],
+            opp["direction"],
+            opp["score"],
+            opp["price"],
+            opp["sizing"]["contracts"],
+            opp["sizing"]["total_risk"],
+            opp.get("options_details", {}).get("expiration", "N/A")
+        ])
+
+    headers = ["Rank", "Ticker", "Dir", "Score", "Price", "Contracts", "Risk $", "Exp"]
+    print(tabulate(table_data, headers=headers, tablefmt="github"))
+
+    print("\nDetailed top ideas:")
+    for opp in all_opportunities[:8]:
+        if opp["score"] < config.MIN_SCORE_TO_TRADE:
+            continue
+        print(f"\n{opp['ticker']} {opp['direction']} | Score: {opp['score']}")
+        print(f"  Price: ${opp['price']}")
+        print(f"  Fundamental: {opp['reasons']['fundamental']}")
+        print(f"  Trend: {opp['reasons']['trend']}")
+        print(f"  Setup: {opp['reasons']['setup']}")
+        print(f"  Options: {opp.get('options_details', {})}")
+        print(f"  Sizing: {opp['sizing']}")
+
+if __name__ == "__main__":
+    run_scan()
