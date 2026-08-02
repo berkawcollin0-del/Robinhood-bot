@@ -22,6 +22,10 @@ def simple_stock_backtest(ticker: str, start="2023-01-01", end=None):
         print(f"No data for {ticker}")
         return None
 
+    # ---- FIX: Flatten MultiIndex columns if they exist ----
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
     df = df.rename(columns=str.lower)
     df = add_indicators(df)
     df.dropna(inplace=True)
@@ -32,6 +36,7 @@ def simple_stock_backtest(ticker: str, start="2023-01-01", end=None):
     capital = config.ACCOUNT_SIZE
     position = 0
     entry_price = 0
+    entry_date = None
     trades = []
     equity_curve = []
 
