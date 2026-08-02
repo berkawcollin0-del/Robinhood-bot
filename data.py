@@ -14,6 +14,11 @@ def get_stock_data(ticker: str, period: str = "1y") -> pd.DataFrame:
         df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
         if df.empty:
             return pd.DataFrame()
+
+        # Fix MultiIndex columns (common yfinance issue)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
         df = df.rename(columns=str.lower)
         df.dropna(inplace=True)
         return df
