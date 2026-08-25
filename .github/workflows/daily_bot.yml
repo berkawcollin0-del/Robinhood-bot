@@ -1,27 +1,29 @@
-name: Run Trading Backtest
+name: Market Discrepancy Scanner
 
 on:
-  push:
-    branches: [ "main" ]
-  workflow_dispatch: # This allows you to click a button to run it manually
+  schedule:
+    # Runs every 30 minutes (UTC)
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # Allows manual trigger from the GitHub Actions tab
 
 jobs:
-  backtest:
+  scan:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        
-    - name: Run Backtest
-      run: python backtest.py
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Execute Scanner
+        run: python scanner.py
