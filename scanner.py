@@ -1,11 +1,14 @@
 import json
 import requests
+from datetime import datetime, timedelta, timezone
 from thefuzz import fuzz
 
 # ==========================================
 # CONFIGURATION & THRESHOLDS
 # ==========================================
-MIN_KALSHI_VOLUME = 0        # Set to 0 temporarily to ensure we catch markets
+MAX_DAYS_OUT = 30            # Only scan markets expiring in the next X days
+
+MIN_KALSHI_VOLUME = 500      # Raised slightly to filter out micro-markets
 MIN_POLY_VOLUME = 5000       
 
 MIN_DISCREPANCY_PCT = 5.0    
@@ -26,15 +29,18 @@ HEADERS = {
     "Accept": "application/json",
 }
 
+# Calculate the cutoff timestamp (30 days from right now)
+CUTOFF_DATE = datetime.now(timezone.utc) + timedelta(days=MAX_DAYS_OUT)
+CUTOFF_STR = CUTOFF_DATE.strftime("%Y-%m-%dT%H:%M:%SZ")
+
 # ==========================================
 # DATA FETCHING
 # ==========================================
 def fetch_kalshi_markets():
-    """Fetches active open markets from Kalshi using the Events endpoint to bypass MVE spam."""
+    """Fetches active open markets from Kalshi resolving within the next month."""
     clean = []
     
     try:
-        # Requesting /events with nested_markets avoids the pagination wall of MVEs
         res = requests.get(
             f"{KALSHI_API}/events",
             headers=HEADERS,
@@ -49,19 +55,22 @@ def fetch_kalshi_markets():
         events = res.json().get("events", [])
         
         for e in events:
-            # Skip any residual MVE collections
             if e.get("event_ticker", "").startswith("KXMV"):
                 continue
                 
             markets = e.get("markets", [])
             for m in markets:
+                # TIME FILTER: Skip markets expiring after our 30-day cutoff
+                expiration_time = m.get("expiration_time", "")
+                if expiration_time and expiration_time > CUTOFF_STR:
+                    continue
+
                 yes_ask_dollars = float(m.get("yes_ask_dollars", 0) or 0)
                 yes_bid_dollars = float(m.get("yes_bid_dollars", 0) or 0)
                 
                 yes_ask = yes_ask_dollars * 100
                 yes_bid = yes_bid_dollars * 100
                 
-                # Check for volume (handling Kalshi's field name switch)
                 volume = float(m.get("volume_fp", m.get("volume", 0)) or 0)
 
                 # Filter for liquidity
@@ -72,6 +81,7 @@ def fetch_kalshi_markets():
                         "yes_bid": yes_bid,
                         "yes_ask": yes_ask,
                         "volume": volume,
+                        "expiration": expiration_time
                     })
                     
         return clean
@@ -81,7 +91,7 @@ def fetch_kalshi_markets():
 
 
 def fetch_polymarket_events():
-    """Fetches active, liquid events from Polymarket."""
+    """Fetches active, liquid events from Polymarket resolving within the next month."""
     try:
         res = requests.get(
             f"{POLYMARKET_API}/events",
@@ -97,6 +107,11 @@ def fetch_polymarket_events():
         events = res.json()
         clean = []
         for e in events:
+            # TIME FILTER: Skip Polymarket events ending after our 30-day cutoff
+            end_date = e.get("endDate", "")
+            if end_date and end_date > CUTOFF_STR:
+                continue
+
             title = e.get("title", "")
             for m in e.get("markets", []):
                 outcome_prices = m.get("outcomePrices")
@@ -127,7 +142,9 @@ def fetch_polymarket_events():
 # SCANNER LOGIC
 # ==========================================
 def scan_for_opportunities():
+    print(f"Filtering for events resolving on or before: {CUTOFF_STR}")
     print(f"Fetching live market data (Kalshi Min Vol: {MIN_KALSHI_VOLUME}, Poly Min Vol: {MIN_POLY_VOLUME})...")
+    
     kalshi = fetch_kalshi_markets()
     poly = fetch_polymarket_events()
 
@@ -138,12 +155,19 @@ def scan_for_opportunities():
     print("🔎 HIGH-CONVICTION / LOPSIDED MARKETS (Kalshi)")
     print("=" * 65)
     lopsided_count = 0
-    for k in kalshi:
+    
+    # Sort Kalshi by expiration time so the closest events show up first
+    kalshi_sorted = sorted(kalshi, key=lambda x: x["expiration"])
+    
+    for k in kalshi_sorted:
         spread = k["yes_ask"] - k["yes_bid"]
         
         if (k["yes_ask"] >= EXTREME_FAVORITE or k["yes_ask"] <= EXTREME_LONGSHOT) and spread <= MAX_SPREAD_CENTS:
             lopsided_count += 1
-            print(f"[{k['ticker']}] {k['title']}")
+            # Format the expiration date for cleaner printing
+            clean_date = k['expiration'].split('T')[0] if k['expiration'] else "Unknown"
+            
+            print(f"[{clean_date}] {k['title']}")
             print(f"  Price: {k['yes_ask']:.1f}¢ (Bid: {k['yes_bid']:.1f}¢) | Spread: {spread:.1f}¢ | Vol: {k['volume']:.0f}")
 
     if lopsided_count == 0:
@@ -156,7 +180,7 @@ def scan_for_opportunities():
     print("=" * 65)
     found_matches = 0
 
-    for k in kalshi:
+    for k in kalshi_sorted:
         for p in poly:
             similarity = fuzz.token_set_ratio(k["title"].lower(), p["title"].lower())
             
@@ -165,13 +189,15 @@ def scan_for_opportunities():
                 
                 if diff >= MIN_DISCREPANCY_PCT:
                     found_matches += 1
-                    print(f"Match: {k['title']}")
+                    clean_date = k['expiration'].split('T')[0] if k['expiration'] else "Unknown"
+                    print(f"Match [{clean_date}]: {k['title']}")
                     print(f"  Kalshi:     {k['yes_ask']:.1f}¢")
                     print(f"  Polymarket: {p['poly_yes_price']:.1f}¢")
                     print(f"  --> Discrepancy: {diff:.1f}%\n")
 
     if found_matches == 0:
         print(f"No cross-market discrepancies >= {MIN_DISCREPANCY_PCT}% found in current sample.")
+
 
 if __name__ == "__main__":
     scan_for_opportunities()
