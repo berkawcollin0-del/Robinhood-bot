@@ -16,7 +16,7 @@ EXTREME_FAVORITE = 90.0      # Flag favorites priced >= 90¢
 EXTREME_LONGSHOT = 10.0      # Flag longshots priced <= 10¢
 
 # Use the recommended external-api host for API traders
-KALSHI_API = "https://external-api.kalshi.com/trade-api/v2"
+KALSHI_API = "https://trading-api.kalshi.com/trade-api/v2"
 POLYMARKET_API = "https://gamma-api.polymarket.com"
 
 HEADERS = {
