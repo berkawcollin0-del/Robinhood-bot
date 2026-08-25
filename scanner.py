@@ -5,15 +5,15 @@ from thefuzz import fuzz
 # ==========================================
 # CONFIGURATION & THRESHOLDS
 # ==========================================
-MIN_KALSHI_VOLUME = 100      # Lowered to ensure we catch active markets
-MIN_POLY_VOLUME = 5000       # Minimum volume to scan on Polymarket
+MIN_KALSHI_VOLUME = 0        # Set to 0 temporarily to ensure we catch markets
+MIN_POLY_VOLUME = 5000       
 
-MIN_DISCREPANCY_PCT = 5.0    # Only show cross-market differences >= 5%
-FUZZY_MATCH_THRESHOLD = 80   # Title match similarity (0-100)
+MIN_DISCREPANCY_PCT = 5.0    
+FUZZY_MATCH_THRESHOLD = 80   
 
-MAX_SPREAD_CENTS = 8.0       # Ignore markets with bid/ask spreads wider than this
-EXTREME_FAVORITE = 90.0      # Flag favorites priced >= 90¢
-EXTREME_LONGSHOT = 10.0      # Flag longshots priced <= 10¢
+MAX_SPREAD_CENTS = 8.0       
+EXTREME_FAVORITE = 90.0      
+EXTREME_LONGSHOT = 10.0      
 
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 POLYMARKET_API = "https://gamma-api.polymarket.com"
@@ -30,67 +30,54 @@ HEADERS = {
 # DATA FETCHING
 # ==========================================
 def fetch_kalshi_markets():
-    """Fetches active, liquid open markets from Kalshi, paging past MVE spam."""
+    """Fetches active open markets from Kalshi using the Events endpoint to bypass MVE spam."""
     clean = []
-    cursor = None
     
-    # Loop up to 5 times (fetching up to 5,000 markets) to get past the parlay wall
-    for page in range(5):
-        try:
-            params = {"status": "open", "limit": 1000}
-            if cursor:
-                params["cursor"] = cursor
+    try:
+        # Requesting /events with nested_markets avoids the pagination wall of MVEs
+        res = requests.get(
+            f"{KALSHI_API}/events",
+            headers=HEADERS,
+            params={"status": "open", "limit": 200, "with_nested_markets": "true"},
+            timeout=15,
+        )
+
+        if res.status_code != 200:
+            print(f"Kalshi API error ({res.status_code}): {res.text[:200]}")
+            return []
+
+        events = res.json().get("events", [])
+        
+        for e in events:
+            # Skip any residual MVE collections
+            if e.get("event_ticker", "").startswith("KXMV"):
+                continue
                 
-            res = requests.get(
-                f"{KALSHI_API}/markets",
-                headers=HEADERS,
-                params=params,
-                timeout=15,
-            )
-
-            if res.status_code != 200:
-                print(f"Kalshi API error ({res.status_code}): {res.text[:200]}")
-                break
-
-            response_json = res.json()
-            data = response_json.get("markets", [])
-            cursor = response_json.get("cursor") # Get next page token
-
-            for m in data:
-                ticker = m.get("ticker", "")
-                
-                # SKIP auto-generated multivariate parlays
-                if ticker.startswith("KXMV"):
-                    continue
-
-                # Parse prices
+            markets = e.get("markets", [])
+            for m in markets:
                 yes_ask_dollars = float(m.get("yes_ask_dollars", 0) or 0)
                 yes_bid_dollars = float(m.get("yes_bid_dollars", 0) or 0)
+                
                 yes_ask = yes_ask_dollars * 100
                 yes_bid = yes_bid_dollars * 100
-
-                # Parse volume
+                
+                # Check for volume (handling Kalshi's field name switch)
                 volume = float(m.get("volume_fp", m.get("volume", 0)) or 0)
 
                 # Filter for liquidity
                 if yes_ask > 0 and volume >= MIN_KALSHI_VOLUME:
                     clean.append({
-                        "ticker": ticker,
+                        "ticker": m.get("ticker", ""),
                         "title": m.get("title", ""),
                         "yes_bid": yes_bid,
                         "yes_ask": yes_ask,
                         "volume": volume,
                     })
-            
-            # If no cursor is returned, we've reached the end of the market list
-            if not cursor:
-                break
-                
-        except Exception as e:
-            print(f"Error fetching Kalshi page {page+1}: {e}")
-            break
-
-    return clean
+                    
+        return clean
+    except Exception as e:
+        print(f"Error fetching Kalshi: {e}")
+        return []
 
 
 def fetch_polymarket_events():
