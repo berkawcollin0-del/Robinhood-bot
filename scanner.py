@@ -4,20 +4,23 @@ from datetime import datetime, timedelta, timezone
 from thefuzz import fuzz
 
 # ==========================================
-# CONFIGURATION & THRESHOLDS
+# OPTIMIZED CONFIGURATION FOR MORE SIGNALS
 # ==========================================
-MAX_DAYS_OUT = 30            # Only scan markets expiring in the next X days
+MAX_DAYS_OUT = 60            # Look out 60 days to catch monthly macro/Fed/CPI prints
 
-MIN_KALSHI_VOLUME = 500      # Raised slightly to filter out micro-markets
-MIN_POLY_VOLUME = 5000       
+MIN_KALSHI_VOLUME = 50       # Lowered to capture fast-moving short-term markets
+MIN_POLY_VOLUME = 1000       # Lowered to match more Polymarket contracts
 
-MIN_DISCREPANCY_PCT = 5.0    
-FUZZY_MATCH_THRESHOLD = 80   
+MIN_DISCREPANCY_PCT = 4.0    # Show spreads of 4% or higher
+FUZZY_MATCH_THRESHOLD = 70   # Slightly looser title matching for questions vs statements
 
-MAX_SPREAD_CENTS = 8.0       
-EXTREME_FAVORITE = 90.0      
-EXTREME_LONGSHOT = 10.0      
+MAX_SPREAD_CENTS = 10.0      # Allow slightly wider spreads
+EXTREME_FAVORITE = 85.0      # Flag favorites priced >= 85¢
+EXTREME_LONGSHOT = 15.0      # Flag underdogs priced <= 15¢
 
+REPORT_FILE = "scan_results.md" # The markdown file saved to your GitHub repo
+
+# API Endpoints
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 POLYMARKET_API = "https://gamma-api.polymarket.com"
 
@@ -29,17 +32,22 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-# Calculate the cutoff timestamp (30 days from right now)
+# Calculate the cutoff timestamp
 CUTOFF_DATE = datetime.now(timezone.utc) + timedelta(days=MAX_DAYS_OUT)
 CUTOFF_STR = CUTOFF_DATE.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+# Simple logger to print and save to markdown
+report_lines = []
+def log(msg=""):
+    print(msg)
+    report_lines.append(msg)
 
 # ==========================================
 # DATA FETCHING
 # ==========================================
 def fetch_kalshi_markets():
-    """Fetches active open markets from Kalshi resolving within the next month."""
+    """Fetches active open markets from Kalshi resolving within the next 60 days."""
     clean = []
-    
     try:
         res = requests.get(
             f"{KALSHI_API}/events",
@@ -49,7 +57,7 @@ def fetch_kalshi_markets():
         )
 
         if res.status_code != 200:
-            print(f"Kalshi API error ({res.status_code}): {res.text[:200]}")
+            log(f"Kalshi API error ({res.status_code}): {res.text[:200]}")
             return []
 
         events = res.json().get("events", [])
@@ -60,20 +68,17 @@ def fetch_kalshi_markets():
                 
             markets = e.get("markets", [])
             for m in markets:
-                # TIME FILTER: Skip markets expiring after our 30-day cutoff
                 expiration_time = m.get("expiration_time", "")
                 if expiration_time and expiration_time > CUTOFF_STR:
                     continue
 
                 yes_ask_dollars = float(m.get("yes_ask_dollars", 0) or 0)
                 yes_bid_dollars = float(m.get("yes_bid_dollars", 0) or 0)
-                
                 yes_ask = yes_ask_dollars * 100
                 yes_bid = yes_bid_dollars * 100
                 
                 volume = float(m.get("volume_fp", m.get("volume", 0)) or 0)
 
-                # Filter for liquidity
                 if yes_ask > 0 and volume >= MIN_KALSHI_VOLUME:
                     clean.append({
                         "ticker": m.get("ticker", ""),
@@ -83,15 +88,13 @@ def fetch_kalshi_markets():
                         "volume": volume,
                         "expiration": expiration_time
                     })
-                    
         return clean
     except Exception as e:
-        print(f"Error fetching Kalshi: {e}")
+        log(f"Error fetching Kalshi: {e}")
         return []
 
-
 def fetch_polymarket_events():
-    """Fetches active, liquid events from Polymarket resolving within the next month."""
+    """Fetches active, liquid events from Polymarket resolving within the next 60 days."""
     try:
         res = requests.get(
             f"{POLYMARKET_API}/events",
@@ -101,13 +104,12 @@ def fetch_polymarket_events():
         )
 
         if res.status_code != 200:
-            print(f"Polymarket API error ({res.status_code}): {res.text[:200]}")
+            log(f"Polymarket API error ({res.status_code}): {res.text[:200]}")
             return []
 
         events = res.json()
         clean = []
         for e in events:
-            # TIME FILTER: Skip Polymarket events ending after our 30-day cutoff
             end_date = e.get("endDate", "")
             if end_date and end_date > CUTOFF_STR:
                 continue
@@ -134,50 +136,40 @@ def fetch_polymarket_events():
                         continue
         return clean
     except Exception as e:
-        print(f"Error fetching Polymarket: {e}")
+        log(f"Error fetching Polymarket: {e}")
         return []
-
 
 # ==========================================
 # SCANNER LOGIC
 # ==========================================
 def scan_for_opportunities():
-    print(f"Filtering for events resolving on or before: {CUTOFF_STR}")
-    print(f"Fetching live market data (Kalshi Min Vol: {MIN_KALSHI_VOLUME}, Poly Min Vol: {MIN_POLY_VOLUME})...")
+    log(f"# Market Arbitrage & Opportunity Scan\n*Generated on: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*\n")
+    log(f"Filtering for events resolving on or before: `{CUTOFF_STR}`")
+    log(f"Volume Thresholds: Kalshi $\ge$ {MIN_KALSHI_VOLUME}, Poly $\ge$ {MIN_POLY_VOLUME}\n")
     
     kalshi = fetch_kalshi_markets()
     poly = fetch_polymarket_events()
 
-    print(f"✅ Loaded {len(kalshi)} liquid Kalshi markets and {len(poly)} Polymarket contracts.\n")
+    log(f"✅ Loaded **{len(kalshi)}** liquid Kalshi markets and **{len(poly)}** Polymarket contracts.\n")
 
     # --- 1. DETECT LOPSIDED / EXTREME ODDS ON KALSHI ---
-    print("=" * 65)
-    print("🔎 HIGH-CONVICTION / LOPSIDED MARKETS (Kalshi)")
-    print("=" * 65)
+    log("## 🔎 HIGH-CONVICTION / LOPSIDED MARKETS (Kalshi)")
     lopsided_count = 0
-    
-    # Sort Kalshi by expiration time so the closest events show up first
     kalshi_sorted = sorted(kalshi, key=lambda x: x["expiration"])
     
     for k in kalshi_sorted:
         spread = k["yes_ask"] - k["yes_bid"]
-        
         if (k["yes_ask"] >= EXTREME_FAVORITE or k["yes_ask"] <= EXTREME_LONGSHOT) and spread <= MAX_SPREAD_CENTS:
             lopsided_count += 1
-            # Format the expiration date for cleaner printing
             clean_date = k['expiration'].split('T')[0] if k['expiration'] else "Unknown"
-            
-            print(f"[{clean_date}] {k['title']}")
-            print(f"  Price: {k['yes_ask']:.1f}¢ (Bid: {k['yes_bid']:.1f}¢) | Spread: {spread:.1f}¢ | Vol: {k['volume']:.0f}")
+            log(f"**[{clean_date}]** {k['title']}")
+            log(f"> Price: **{k['yes_ask']:.1f}¢** (Bid: {k['yes_bid']:.1f}¢) | Spread: {spread:.1f}¢ | Vol: {k['volume']:.0f}\n")
 
     if lopsided_count == 0:
-        print("No extreme lopsided contracts met the liquidity and spread requirements.")
-
+        log("*No extreme lopsided contracts met the liquidity and spread requirements.*\n")
 
     # --- 2. CROSS-MARKET SPREAD SCANNER ---
-    print("\n" + "=" * 65)
-    print(f"⚡ CROSS-MARKET DISCREPANCIES (>= {MIN_DISCREPANCY_PCT}%)")
-    print("=" * 65)
+    log(f"## ⚡ CROSS-MARKET DISCREPANCIES ($\ge$ {MIN_DISCREPANCY_PCT}%)")
     found_matches = 0
 
     for k in kalshi_sorted:
@@ -190,14 +182,17 @@ def scan_for_opportunities():
                 if diff >= MIN_DISCREPANCY_PCT:
                     found_matches += 1
                     clean_date = k['expiration'].split('T')[0] if k['expiration'] else "Unknown"
-                    print(f"Match [{clean_date}]: {k['title']}")
-                    print(f"  Kalshi:     {k['yes_ask']:.1f}¢")
-                    print(f"  Polymarket: {p['poly_yes_price']:.1f}¢")
-                    print(f"  --> Discrepancy: {diff:.1f}%\n")
+                    log(f"**Match [{clean_date}]:** {k['title']}")
+                    log(f"> Kalshi: **{k['yes_ask']:.1f}¢**  |  Polymarket: **{p['poly_yes_price']:.1f}¢**")
+                    log(f"> Discrepancy: **{diff:.1f}%**\n")
 
     if found_matches == 0:
-        print(f"No cross-market discrepancies >= {MIN_DISCREPANCY_PCT}% found in current sample.")
+        log(f"*No cross-market discrepancies $\ge$ {MIN_DISCREPANCY_PCT}% found in current sample.*\n")
 
+    # Write the logged output to a markdown file
+    with open(REPORT_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(report_lines))
+    print(f"\nReport successfully saved to {REPORT_FILE}")
 
 if __name__ == "__main__":
     scan_for_opportunities()
